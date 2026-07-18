@@ -1,0 +1,113 @@
+cmake_minimum_required(VERSION 3.16)
+project(recomp_net VERSION 0.1.0 LANGUAGES C)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+
+option(RNET_ENABLE_ICE "Build libjuice ICE transport" OFF)
+option(RNET_BUILD_EXAMPLES "Build example programs" ON)
+option(RNET_BUILD_TESTS "Build unit tests" ON)
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
+set(RNET_CORE_SOURCES
+  src/platform/rnet_platform.c
+  src/protocol/rnet_protocol.c
+  src/input/rnet_rings.c
+  src/transport/rnet_transport.c
+  src/session/rnet_session.c
+  src/ice/rnet_ice_state.c
+  src/ice/rnet_ice_agent.c
+)
+
+add_library(recomp_net STATIC ${RNET_CORE_SOURCES})
+add_library(recomp_net::recomp_net ALIAS recomp_net)
+
+target_include_directories(recomp_net
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_compile_definitions(recomp_net PRIVATE $<$<PLATFORM_ID:Windows>:_CRT_SECURE_NO_WARNINGS>)
+if(UNIX)
+  target_compile_definitions(recomp_net PRIVATE _POSIX_C_SOURCE=200809L _DEFAULT_SOURCE)
+endif()
+
+if(WIN32)
+  target_link_libraries(recomp_net PUBLIC ws2_32)
+endif()
+
+if(RNET_ENABLE_ICE)
+  find_package(Libjuice QUIET)
+  if(NOT Libjuice_FOUND)
+    include(FetchContent)
+    message(STATUS "Libjuice not found locally; FetchContent paullouisageneau/libjuice")
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(NO_TESTS ON CACHE BOOL "" FORCE)
+    set(NO_SERVER ON CACHE BOOL "" FORCE)
+    set(USE_NETTLE OFF CACHE BOOL "" FORCE)
+    set(WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+      libjuice
+      GIT_REPOSITORY https://github.com/paullouisageneau/libjuice.git
+      GIT_TAG        v1.5.9
+      GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(libjuice)
+    if(NOT TARGET Libjuice::Libjuice)
+      if(TARGET juice-static)
+        add_library(Libjuice::Libjuice ALIAS juice-static)
+      elseif(TARGET juice)
+        add_library(Libjuice::Libjuice ALIAS juice)
+      else()
+        message(FATAL_ERROR
+          "RNET_ENABLE_ICE=ON but libjuice was not found and FetchContent did not "
+          "produce a juice target. Install libjuice, set RNET_LIBJUICE_ROOT, or "
+          "vendor sources under third_party/libjuice.")
+      endif()
+    endif()
+  endif()
+  target_compile_definitions(recomp_net PUBLIC RNET_ENABLE_ICE=1)
+  target_link_libraries(recomp_net PUBLIC Libjuice::Libjuice)
+  if(UNIX AND NOT APPLE)
+    find_package(Threads REQUIRED)
+    target_link_libraries(recomp_net PUBLIC Threads::Threads)
+  endif()
+  # When ICE is off, session uses inline stubs from rnet_ice_internal.h.
+endif()
+
+if(MSVC)
+  target_compile_options(recomp_net PRIVATE /W4)
+else()
+  target_compile_options(recomp_net PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# ---- Examples ----
+if(RNET_BUILD_EXAMPLES)
+  add_executable(lan_delay_2p examples/lan_delay_2p/main.c)
+  target_link_libraries(lan_delay_2p PRIVATE recomp_net)
+
+  add_executable(ice_manual_signaling examples/ice_manual_signaling/main.c)
+  target_link_libraries(ice_manual_signaling PRIVATE recomp_net)
+endif()
+
+# ---- Tests ----
+if(RNET_BUILD_TESTS)
+  enable_testing()
+
+  add_executable(ring_admit_test tests/ring_admit_test.c)
+  target_link_libraries(ring_admit_test PRIVATE recomp_net)
+  target_include_directories(ring_admit_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  add_test(NAME ring_admit_test COMMAND ring_admit_test)
+
+  add_executable(wire_map_test tests/wire_map_test.c)
+  target_link_libraries(wire_map_test PRIVATE recomp_net)
+  add_test(NAME wire_map_test COMMAND wire_map_test)
+endif()
+
+install(TARGETS recomp_net ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)
+install(DIRECTORY include/recomp_net DESTINATION include)

@@ -1,0 +1,62 @@
+#ifndef RNET_PROTOCOL_H
+#define RNET_PROTOCOL_H
+
+#include "recomp_net/config.h"
+#include "recomp_net/input.h"
+#include "recomp_net/types.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define RNET_PKT_HELLO 1
+#define RNET_PKT_READY 2
+#define RNET_PKT_START 3
+#define RNET_PKT_INPUT 4
+#define RNET_PKT_DELAY_SYNC 5
+
+#define RNET_MAX_PACKET 1200
+#define RNET_MAX_BUNDLE 8
+
+typedef struct RNetWireFrame
+{
+    rnet_u32 tick;
+    rnet_u16 size;
+    rnet_u8 bytes[RNET_INPUT_MAX];
+} RNetWireFrame;
+
+rnet_u32 rnet_proto_checksum(const rnet_u8 *data, size_t len);
+
+/* Encode helpers return byte count or -1. */
+int rnet_proto_encode_hello(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
+                            rnet_u8 slot_count, rnet_u8 delay);
+int rnet_proto_encode_ready(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot);
+int rnet_proto_encode_start(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u32 start_tick);
+int rnet_proto_encode_input(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
+                            rnet_u32 ack_tick, const RNetWireFrame *frames, int frame_count);
+int rnet_proto_encode_delay_sync(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 new_delay,
+                                 rnet_u32 effective_tick);
+
+typedef struct RNetDecodedPacket
+{
+    rnet_u16 type;
+    rnet_u32 session_id;
+    rnet_u8 local_slot;
+    rnet_u8 slot_count;
+    rnet_u8 delay;
+    rnet_u32 start_tick;
+    rnet_u32 ack_tick;
+    rnet_u8 new_delay;
+    rnet_u32 effective_tick;
+    int frame_count;
+    RNetWireFrame frames[RNET_MAX_BUNDLE];
+} RNetDecodedPacket;
+
+/* Returns 0 on success. */
+int rnet_proto_decode(const rnet_u8 *data, size_t len, rnet_u32 expect_magic, RNetDecodedPacket *out);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* RNET_PROTOCOL_H */
