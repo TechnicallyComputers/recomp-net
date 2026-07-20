@@ -41,14 +41,29 @@ int rnet_session_start_ice(RNetSession *s, const RNetIceConfig *ice);
 void rnet_session_pump(RNetSession *s);
 
 /*
- * Returns 1 when every remote slot has wire row for sim_tick + D and local
- * sample is staged. On success, calls host publish with resolved slots.
- * Returns 0 if the session should stall (keep pumping).
+ * Returns 1 when remotes are ready, resolved inputs hash-agree via
+ * INPUT_CONFIRM, and publish has been called. Local pad is latched once per
+ * wire tick. Returns 0 to stall (keep pumping), including on input desync.
  */
 int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick);
 
 /* Call after the host completes one authoritative sim step. */
 void rnet_session_advance(RNetSession *s);
+
+/*
+ * Returns 1 if an INPUT_CONFIRM hash disagreement was flagged. Optional outs
+ * receive the desync sim tick and local/remote hashes.
+ */
+int rnet_session_input_desync(const RNetSession *s, rnet_u32 *tick, rnet_u32 *local_hash, rnet_u32 *remote_hash);
+
+/** Best-effort BYE so the peer can drop immediately instead of waiting for timeout. */
+int rnet_session_send_bye(RNetSession *s);
+
+/**
+ * Non-zero if peer sent BYE or no valid UDP for timeout_ms after first RX.
+ * Pass ~1500 for a snappy disconnect while still tolerating brief stalls.
+ */
+int rnet_session_peer_disconnected(const RNetSession *s, rnet_u64 timeout_ms);
 
 /* Deliver an inbound signaling message from the lobby. */
 void rnet_session_push_signal(RNetSession *s, const RNetSignal *msg);

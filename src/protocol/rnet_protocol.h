@@ -14,6 +14,8 @@ extern "C" {
 #define RNET_PKT_START 3
 #define RNET_PKT_INPUT 4
 #define RNET_PKT_DELAY_SYNC 5
+#define RNET_PKT_INPUT_CONFIRM 6
+#define RNET_PKT_BYE 7
 
 #define RNET_MAX_PACKET 1200
 #define RNET_MAX_BUNDLE 8
@@ -36,6 +38,11 @@ int rnet_proto_encode_input(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 s
                             rnet_u32 ack_tick, const RNetWireFrame *frames, int frame_count);
 int rnet_proto_encode_delay_sync(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 new_delay,
                                  rnet_u32 effective_tick);
+/* Agree on resolved pad hash for sim_tick before publish/advance. */
+int rnet_proto_encode_input_confirm(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
+                                    rnet_u32 sim_tick, rnet_u32 input_hash);
+/* Graceful peer leave (best-effort UDP). */
+int rnet_proto_encode_bye(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot);
 
 typedef struct RNetDecodedPacket
 {
@@ -48,6 +55,8 @@ typedef struct RNetDecodedPacket
     rnet_u32 ack_tick;
     rnet_u8 new_delay;
     rnet_u32 effective_tick;
+    rnet_u32 confirm_sim_tick;
+    rnet_u32 confirm_hash;
     int frame_count;
     RNetWireFrame frames[RNET_MAX_BUNDLE];
 } RNetDecodedPacket;

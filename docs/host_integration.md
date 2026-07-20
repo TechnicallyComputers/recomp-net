@@ -24,6 +24,16 @@ while (running) {
 **Rule:** only one authoritative sim tick may advance after a successful
 `try_admit`. Do not sample pads for tick `T+1` until `advance` has run.
 
+`try_admit` **latches** the local pad once per wire tick (re-admits reuse it)
+and waits for **INPUT_CONFIRM** hash agreement across all slots before
+`publish`. Remote INPUT frames are first-wins. If hashes disagree, admission
+stalls permanently for the session; poll with `rnet_session_input_desync`.
+
+On host shutdown call `rnet_session_send_bye` before destroy so the peer can
+exit immediately. While waiting on admit, poll
+`rnet_session_peer_disconnected(session, 1500)` (~1.5s silence or peer BYE)
+and leave the session instead of spinning forever.
+
 ## Host vtable
 
 | Callback | Role |

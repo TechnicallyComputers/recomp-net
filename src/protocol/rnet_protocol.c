@@ -169,6 +169,43 @@ int rnet_proto_encode_delay_sync(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_
     return finish_packet(out, c, cap);
 }
 
+int rnet_proto_encode_input_confirm(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
+                                    rnet_u32 sim_tick, rnet_u32 input_hash)
+{
+    rnet_u8 *c = out;
+    if (cap < 28)
+    {
+        return -1;
+    }
+    write_u32(&c, magic);
+    write_u16(&c, RNET_PKT_INPUT_CONFIRM);
+    write_u32(&c, session_id);
+    *c++ = local_slot;
+    *c++ = 0;
+    *c++ = 0;
+    *c++ = 0;
+    write_u32(&c, sim_tick);
+    write_u32(&c, input_hash);
+    return finish_packet(out, c, cap);
+}
+
+int rnet_proto_encode_bye(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot)
+{
+    rnet_u8 *c = out;
+    if (cap < 16)
+    {
+        return -1;
+    }
+    write_u32(&c, magic);
+    write_u16(&c, RNET_PKT_BYE);
+    write_u32(&c, session_id);
+    *c++ = local_slot;
+    *c++ = 0;
+    *c++ = 0;
+    *c++ = 0;
+    return finish_packet(out, c, cap);
+}
+
 int rnet_proto_decode(const rnet_u8 *data, size_t len, rnet_u32 expect_magic, RNetDecodedPacket *out)
 {
     const rnet_u8 *c;
@@ -278,6 +315,24 @@ int rnet_proto_decode(const rnet_u8 *data, size_t len, rnet_u32 expect_magic, RN
         out->new_delay = *c++;
         c += 3;
         out->effective_tick = read_u32(&c);
+        break;
+    case RNET_PKT_INPUT_CONFIRM:
+        if ((size_t)(end - c) < 12)
+        {
+            return -1;
+        }
+        out->local_slot = *c++;
+        c += 3;
+        out->confirm_sim_tick = read_u32(&c);
+        out->confirm_hash = read_u32(&c);
+        break;
+    case RNET_PKT_BYE:
+        if ((size_t)(end - c) < 4)
+        {
+            return -1;
+        }
+        out->local_slot = *c++;
+        c += 3;
         break;
     default:
         return -1;

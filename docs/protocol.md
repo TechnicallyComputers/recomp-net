@@ -52,7 +52,25 @@ Bundles retransmit recent local wire rows (`bundle_redundancy`).
 Optional mid-session delay change. Applied when not past the effective tick
 (or while not running).
 
+### INPUT_CONFIRM (6)
+
+`local_slot : u8`, `pad : u8×3`, `sim_tick : u32`, `input_hash : u32`
+
+Peers agree on the resolved pad set for `sim_tick` before publish/advance.
+`input_hash` is `rnet_proto_checksum` over `sim_tick` (LE u32) followed by each
+slot's `size` (LE u16) and `bytes`. Session latches local/remote wire rows
+(first-wins) so late retransmits cannot change the hash mid-confirm.
+Mismatch flags an input desync; agreement across all slots allows admission.
+
+### BYE (7)
+
+`local_slot : u8`, `pad : u8×3`
+
+Graceful leave. Best-effort UDP (hosts may retransmit a few times on shutdown).
+Peer marks the sender gone and can exit without waiting for the RX timeout.
+
 ## Wire vs sim
 
 Hosts reason in **sim ticks**. Inputs on the wire are indexed by
-`wire = sim + D`. Admission for sim `T` requires remote rows at wire `T + D`.
+`wire = sim + D`. Admission for sim `T` requires remote rows at wire `T + D`,
+then INPUT_CONFIRM hash agreement on the resolved set.

@@ -13,8 +13,16 @@ vendor SSB64 code and does not implement rollback, automatch, or game UI.
 - Opaque per-slot input blobs (`RNetInputSample`)
 - Fixed input delay `D` with `try_admit` / `advance` host loop
 - UDP LAN transport and optional ICE mux
-- Host-owned signaling callbacks (no built-in lobby server)
+- Host-owned signaling callbacks (ICE); lobby / matchmaking is **not** in this
+  repo — see [`docs/lobby.md`](docs/lobby.md) and the private `recomp-net-server`
 - C11, CMake, MIT license
+
+## Lobby
+
+This library has no lobby binary. The MotK / psxrecomp WebSocket lobby server is
+the closed-source sibling project **`recomp-net-server`** (default
+`ws://127.0.0.1:8765`). Client-facing protocol notes:
+[`docs/lobby.md`](docs/lobby.md).
 
 ## Build (LAN, no ICE)
 

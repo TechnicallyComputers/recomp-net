@@ -40,7 +40,23 @@ struct RNetSession
     rnet_u64 last_hello_ms;
     rnet_u64 last_ready_ms;
     rnet_u64 last_input_ms;
+    rnet_u64 last_confirm_ms;
     int is_sim_authority; /* local_slot == 0 sends START */
+    /* Resolved-input confirmation (hash agree before publish). */
+    int confirm_active;
+    rnet_u32 confirm_sim_tick;
+    rnet_u32 confirm_hash;
+    rnet_u8 confirm_seen[RNET_MAX_SLOTS];
+    rnet_u32 peer_confirm_hash[RNET_MAX_SLOTS];
+    RNetInputSample confirm_resolved[RNET_MAX_SLOTS];
+    int input_desync;
+    rnet_u32 desync_tick;
+    rnet_u32 desync_local_hash;
+    rnet_u32 desync_remote_hash;
+    /* Peer liveness: any valid packet stamps last_peer_rx_ms; BYE sets peer_gone. */
+    rnet_u64 last_peer_rx_ms;
+    rnet_u64 session_start_ms;
+    int peer_gone;
 };
 
 static rnet_u64 session_now(RNetSession *s)
@@ -51,6 +67,8 @@ static rnet_u64 session_now(RNetSession *s)
     }
     return rnet_os_monotonic_ms();
 }
+
+static void send_raw(RNetSession *s, const rnet_u8 *buf, int len);
 
 #if defined(RNET_ENABLE_ICE)
 static void ice_emit_bridge(const RNetSignal *msg, void *user)
@@ -76,7 +94,13 @@ static int ice_recv_bridge(void *ice_ctx, rnet_u8 *buf, size_t cap, size_t *out_
 static void store_remote_frame(RNetSession *s, rnet_u8 slot, const RNetWireFrame *frame)
 {
     RNetInputSample sample;
+    RNetInputSample existing;
     if ((s == NULL) || (frame == NULL) || (slot >= s->cfg.slot_count) || (slot == s->cfg.local_slot))
+    {
+        return;
+    }
+    /* First-wins: later retransmits must not overwrite a latched wire row. */
+    if (rnet_ring_get(&s->remote_rings[slot], frame->tick, &existing))
     {
         return;
     }
@@ -89,6 +113,72 @@ static void store_remote_frame(RNetSession *s, rnet_u8 slot, const RNetWireFrame
     }
     sample.valid = 1;
     rnet_ring_store(&s->remote_rings[slot], &sample);
+}
+
+static rnet_u32 hash_resolved_inputs(rnet_u32 sim_tick, const RNetInputSample *by_slot, int slots)
+{
+    rnet_u8 buf[4 + RNET_MAX_SLOTS * (2 + RNET_INPUT_MAX)];
+    size_t n = 0;
+    int i;
+
+    buf[n++] = (rnet_u8)(sim_tick & 0xFFu);
+    buf[n++] = (rnet_u8)((sim_tick >> 8) & 0xFFu);
+    buf[n++] = (rnet_u8)((sim_tick >> 16) & 0xFFu);
+    buf[n++] = (rnet_u8)((sim_tick >> 24) & 0xFFu);
+    for (i = 0; i < slots; ++i)
+    {
+        rnet_u16 sz = by_slot[i].size;
+        if (sz > RNET_INPUT_MAX)
+        {
+            sz = RNET_INPUT_MAX;
+        }
+        buf[n++] = (rnet_u8)(sz & 0xFFu);
+        buf[n++] = (rnet_u8)((sz >> 8) & 0xFFu);
+        if (sz > 0)
+        {
+            memcpy(buf + n, by_slot[i].bytes, sz);
+            n += sz;
+        }
+    }
+    return rnet_proto_checksum(buf, n);
+}
+
+static void send_input_confirm(RNetSession *s)
+{
+    rnet_u8 buf[RNET_MAX_PACKET];
+    int len;
+    rnet_u64 now;
+
+    if ((s == NULL) || !s->confirm_active)
+    {
+        return;
+    }
+    len = rnet_proto_encode_input_confirm(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id, s->cfg.local_slot,
+                                          s->confirm_sim_tick, s->confirm_hash);
+    send_raw(s, buf, len);
+    now = session_now(s);
+    s->last_confirm_ms = now;
+}
+
+static int confirms_agree(const RNetSession *s)
+{
+    rnet_u8 slot;
+    if ((s == NULL) || !s->confirm_active)
+    {
+        return 0;
+    }
+    for (slot = 0; slot < s->cfg.slot_count; ++slot)
+    {
+        if (!s->confirm_seen[slot])
+        {
+            return 0;
+        }
+        if (s->peer_confirm_hash[slot] != s->confirm_hash)
+        {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
@@ -145,6 +235,26 @@ static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
             s->cfg.input_delay = pkt->new_delay;
         }
         break;
+    case RNET_PKT_INPUT_CONFIRM:
+        if (pkt->local_slot < s->cfg.slot_count && pkt->confirm_sim_tick == s->sim_tick)
+        {
+            s->confirm_seen[pkt->local_slot] = 1;
+            s->peer_confirm_hash[pkt->local_slot] = pkt->confirm_hash;
+            if (s->confirm_active && pkt->confirm_hash != s->confirm_hash)
+            {
+                s->input_desync = 1;
+                s->desync_tick = s->sim_tick;
+                s->desync_local_hash = s->confirm_hash;
+                s->desync_remote_hash = pkt->confirm_hash;
+            }
+        }
+        break;
+    case RNET_PKT_BYE:
+        if (pkt->local_slot != s->cfg.local_slot)
+        {
+            s->peer_gone = 1;
+        }
+        break;
     default:
         break;
     }
@@ -175,6 +285,7 @@ static void pump_recv(RNetSession *s)
         }
         if (rnet_proto_decode(buf, (size_t)n, s->cfg.protocol_magic, &pkt) == 0)
         {
+            s->last_peer_rx_ms = session_now(s);
             handle_decoded(s, &pkt);
         }
     }
@@ -328,6 +439,9 @@ RNetSession *rnet_session_create(const RNetConfig *cfg, const RNetHostVTable *ho
     s->delay = cfg->input_delay;
     s->phase = RNET_PHASE_IDLE;
     s->is_sim_authority = (cfg->local_slot == 0) ? 1 : 0;
+    s->session_start_ms = rnet_os_monotonic_ms();
+    s->last_peer_rx_ms = 0;
+    s->peer_gone = 0;
     rnet_transport_init(&s->transport);
     rnet_ring_clear(&s->local_ring);
     for (i = 0; i < RNET_MAX_SLOTS; ++i)
@@ -422,7 +536,9 @@ int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick)
     RNetInputSample resolved[RNET_MAX_SLOTS];
     RNetInputSample local;
     rnet_u32 wire;
+    rnet_u32 hash;
     rnet_u8 slot;
+    rnet_u64 now;
 
     if ((s == NULL) || (s->phase != RNET_PHASE_RUNNING))
     {
@@ -433,24 +549,24 @@ int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick)
         /* Host must advance in lockstep with session clock. */
         return 0;
     }
+    if (s->input_desync)
+    {
+        return 0;
+    }
 
     wire = rnet_wire_tick_from_sim(sim_tick, s->delay);
-    memset(&local, 0, sizeof(local));
-    s->host.sample_local(sim_tick, &local, s->host.ctx);
-    local.tick = wire;
-    local.valid = 1;
-    if (local.size > RNET_INPUT_MAX)
+    /* Latch local once per wire tick; re-admits reuse the stored sample. */
+    if (!rnet_ring_get(&s->local_ring, wire, &local))
     {
-        local.size = RNET_INPUT_MAX;
-    }
-    rnet_ring_store(&s->local_ring, &local);
-
-    /* Also keep a gameplay-indexed copy at sim_tick for publish clarity. */
-    {
-        RNetInputSample gameplay = local;
-        gameplay.tick = sim_tick;
-        /* Prefer publishing gameplay-indexed samples. */
-        (void)gameplay;
+        memset(&local, 0, sizeof(local));
+        s->host.sample_local(sim_tick, &local, s->host.ctx);
+        local.tick = wire;
+        local.valid = 1;
+        if (local.size > RNET_INPUT_MAX)
+        {
+            local.size = RNET_INPUT_MAX;
+        }
+        rnet_ring_store(&s->local_ring, &local);
     }
 
     if (!remotes_ready_for_sim(s, sim_tick))
@@ -479,8 +595,74 @@ int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick)
         }
     }
 
-    s->host.publish(sim_tick, resolved, (int)s->cfg.slot_count, s->host.ctx);
-    send_input_bundle(s);
+    hash = hash_resolved_inputs(sim_tick, resolved, (int)s->cfg.slot_count);
+
+    if (!s->confirm_active || s->confirm_sim_tick != sim_tick)
+    {
+        /* Peer INPUT_CONFIRM may arrive before we activate. Preserve those
+         * same-tick sightings — wiping them races the slower peer into a
+         * permanent stall once the faster peer admits and stops retransmit. */
+        rnet_u8 saved_seen[RNET_MAX_SLOTS];
+        rnet_u32 saved_hash[RNET_MAX_SLOTS];
+        memcpy(saved_seen, s->confirm_seen, sizeof(saved_seen));
+        memcpy(saved_hash, s->peer_confirm_hash, sizeof(saved_hash));
+
+        s->confirm_active = 1;
+        s->confirm_sim_tick = sim_tick;
+        s->confirm_hash = hash;
+        memcpy(s->confirm_resolved, resolved, sizeof(resolved));
+        memset(s->confirm_seen, 0, sizeof(s->confirm_seen));
+        memset(s->peer_confirm_hash, 0, sizeof(s->peer_confirm_hash));
+        for (slot = 0; slot < s->cfg.slot_count; ++slot)
+        {
+            if (slot == s->cfg.local_slot)
+            {
+                continue;
+            }
+            if (saved_seen[slot])
+            {
+                s->confirm_seen[slot] = 1;
+                s->peer_confirm_hash[slot] = saved_hash[slot];
+                if (saved_hash[slot] != hash)
+                {
+                    s->input_desync = 1;
+                    s->desync_tick = sim_tick;
+                    s->desync_local_hash = hash;
+                    s->desync_remote_hash = saved_hash[slot];
+                    return 0;
+                }
+            }
+        }
+        s->confirm_seen[s->cfg.local_slot] = 1;
+        s->peer_confirm_hash[s->cfg.local_slot] = hash;
+        send_input_confirm(s);
+        send_input_bundle(s);
+        return 0;
+    }
+
+    if (hash != s->confirm_hash)
+    {
+        s->input_desync = 1;
+        s->desync_tick = sim_tick;
+        s->desync_local_hash = hash;
+        s->desync_remote_hash = s->confirm_hash;
+        return 0;
+    }
+
+    now = session_now(s);
+    if (now - s->last_confirm_ms >= 16ULL)
+    {
+        send_input_confirm(s);
+    }
+
+    if (!confirms_agree(s))
+    {
+        send_input_bundle(s);
+        return 0;
+    }
+
+    s->host.publish(sim_tick, s->confirm_resolved, (int)s->cfg.slot_count, s->host.ctx);
+    s->confirm_active = 0;
     return 1;
 }
 
@@ -491,6 +673,86 @@ void rnet_session_advance(RNetSession *s)
         return;
     }
     s->sim_tick++;
+    s->confirm_active = 0;
+    memset(s->confirm_seen, 0, sizeof(s->confirm_seen));
+}
+
+int rnet_session_input_desync(const RNetSession *s, rnet_u32 *tick, rnet_u32 *local_hash, rnet_u32 *remote_hash)
+{
+    if ((s == NULL) || !s->input_desync)
+    {
+        return 0;
+    }
+    if (tick != NULL)
+    {
+        *tick = s->desync_tick;
+    }
+    if (local_hash != NULL)
+    {
+        *local_hash = s->desync_local_hash;
+    }
+    if (remote_hash != NULL)
+    {
+        *remote_hash = s->desync_remote_hash;
+    }
+    return 1;
+}
+
+int rnet_session_send_bye(RNetSession *s)
+{
+    rnet_u8 buf[64];
+    int n;
+
+    if ((s == NULL) || (s->transport.mode == RNET_TRANSPORT_NONE))
+    {
+        return -1;
+    }
+    n = rnet_proto_encode_bye(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id, s->cfg.local_slot);
+    if (n <= 0)
+    {
+        return -1;
+    }
+    /* Best-effort: send a few times so a single loss doesn't leave peer hanging. */
+    (void)rnet_transport_send(&s->transport, buf, (size_t)n);
+    (void)rnet_transport_send(&s->transport, buf, (size_t)n);
+    (void)rnet_transport_send(&s->transport, buf, (size_t)n);
+    return 0;
+}
+
+int rnet_session_peer_disconnected(const RNetSession *s, rnet_u64 timeout_ms)
+{
+    rnet_u64 now;
+    rnet_u64 last;
+
+    if (s == NULL)
+    {
+        return 0;
+    }
+    if (s->peer_gone)
+    {
+        return 1;
+    }
+    if (timeout_ms == 0)
+    {
+        return 0;
+    }
+    now = rnet_os_monotonic_ms();
+    if (s->last_peer_rx_ms == 0)
+    {
+        /* No peer traffic yet — only after we expected packets (linking/running).
+         * Generous window so slow HELLO exchange isn't a false disconnect. */
+        if (s->phase != RNET_PHASE_RUNNING && s->phase != RNET_PHASE_LINKING)
+        {
+            return 0;
+        }
+        if (s->session_start_ms != 0 && (now - s->session_start_ms) > (timeout_ms * 10u))
+        {
+            return 1;
+        }
+        return 0;
+    }
+    last = s->last_peer_rx_ms;
+    return (now > last && (now - last) >= timeout_ms) ? 1 : 0;
 }
 
 void rnet_session_push_signal(RNetSession *s, const RNetSignal *msg)
