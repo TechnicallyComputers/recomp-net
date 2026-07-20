@@ -41,9 +41,18 @@ int rnet_session_start_ice(RNetSession *s, const RNetIceConfig *ice);
 void rnet_session_pump(RNetSession *s);
 
 /*
- * Returns 1 when remotes are ready, resolved inputs hash-agree via
- * INPUT_CONFIRM, and publish has been called. Local pad is latched once per
- * wire tick. Returns 0 to stall (keep pumping), including on input desync.
+ * Park until a LAN datagram may be readable (or timeout_ms). Prefer this over
+ * Sleep/Delay in admit barriers: under dual-process load, 1ms sleeps often
+ * stretch to several ms and serialize FMV lockstep. ICE falls back to sleep.
+ * Returns 1 if the socket reported readable, 0 on timeout/unavailable.
+ */
+int rnet_session_wait_recv(RNetSession *s, int timeout_ms);
+
+/*
+ * Returns 1 when gameplay inputs for sim_tick (wire=sim) are present for
+ * every remote, publish has been called, and a fresh local sample was stored
+ * at wire=sim+D. INPUT_CONFIRM is sent for async desync checks (non-blocking).
+ * Returns 0 to stall (keep pumping), including on input desync.
  */
 int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick);
 
@@ -73,6 +82,24 @@ int rnet_session_local_slot(const RNetSession *s);
 rnet_u32 rnet_session_sim_tick(const RNetSession *s);
 int rnet_session_is_running(const RNetSession *s);
 RNetIceState rnet_session_ice_state(const RNetSession *s);
+
+/* Savestate / SRAM transfer ops for rnet_session_state_begin. */
+#define RNET_STATE_OP_SAVE 0 /* peer stores file; sim keeps running */
+#define RNET_STATE_OP_LOAD 1 /* stalls admit until guest has blob */
+#define RNET_STATE_OP_SRAM 2 /* stalls admit until guest has blob */
+
+/*
+ * Host-only (local_slot == 0) blob transfer. LOAD/SRAM stall try_admit until
+ * the peer ACKs the full payload; SAVE does not stall (async catch-up).
+ */
+int rnet_session_state_begin(RNetSession *s, rnet_u8 op, rnet_u8 slot, const void *data, size_t size);
+int rnet_session_state_busy(const RNetSession *s);
+/* 1 when transfer complete and blob ready for guest apply/store (or host finish). */
+int rnet_session_state_take_ready(RNetSession *s, rnet_u8 *op_out, rnet_u8 *slot_out, const void **data_out,
+                                  size_t *size_out);
+/* After apply/store: clear transfer; hard_resync clears input rings on LOAD. */
+void rnet_session_state_finish(RNetSession *s, int hard_resync);
+void rnet_session_hard_resync(RNetSession *s);
 
 #ifdef __cplusplus
 }

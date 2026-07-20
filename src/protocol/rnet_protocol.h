@@ -16,9 +16,14 @@ extern "C" {
 #define RNET_PKT_DELAY_SYNC 5
 #define RNET_PKT_INPUT_CONFIRM 6
 #define RNET_PKT_BYE 7
+#define RNET_PKT_STATE_BEGIN 8
+#define RNET_PKT_STATE_CHUNK 9
+#define RNET_PKT_STATE_ACK 10
 
 #define RNET_MAX_PACKET 1200
 #define RNET_MAX_BUNDLE 8
+#define RNET_STATE_CHUNK_MAX 1024
+#define RNET_STATE_MAX (512u * 1024u)
 
 typedef struct RNetWireFrame
 {
@@ -44,6 +49,15 @@ int rnet_proto_encode_input_confirm(rnet_u8 *out, size_t cap, rnet_u32 magic, rn
 /* Graceful peer leave (best-effort UDP). */
 int rnet_proto_encode_bye(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot);
 
+/* Host→guest savestate transfer (chunked, ACK'd). */
+int rnet_proto_encode_state_begin(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
+                                  rnet_u8 op, rnet_u8 slot, rnet_u32 xfer_id, rnet_u32 total_size,
+                                  rnet_u32 payload_crc);
+int rnet_proto_encode_state_chunk(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
+                                  rnet_u32 xfer_id, rnet_u32 offset, const rnet_u8 *data, rnet_u16 size);
+int rnet_proto_encode_state_ack(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
+                                rnet_u32 xfer_id, rnet_u32 ack_bytes);
+
 typedef struct RNetDecodedPacket
 {
     rnet_u16 type;
@@ -59,6 +73,16 @@ typedef struct RNetDecodedPacket
     rnet_u32 confirm_hash;
     int frame_count;
     RNetWireFrame frames[RNET_MAX_BUNDLE];
+    /* STATE_* */
+    rnet_u8 state_op;
+    rnet_u8 state_slot;
+    rnet_u32 state_xfer_id;
+    rnet_u32 state_total_size;
+    rnet_u32 state_payload_crc;
+    rnet_u32 state_offset;
+    rnet_u16 state_chunk_size;
+    rnet_u32 state_ack_bytes;
+    rnet_u8 state_chunk[RNET_STATE_CHUNK_MAX];
 } RNetDecodedPacket;
 
 /* Returns 0 on success. */

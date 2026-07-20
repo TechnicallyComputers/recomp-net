@@ -18,7 +18,7 @@ typedef struct RNetConfig
     rnet_u8 slot_count;
     /* Local player slot index (0..slot_count-1). */
     rnet_u8 local_slot;
-    /* Fixed input delay D in sim ticks (wire_tick = sim_tick + D). */
+    /* Fixed input delay D: sample now at wire sim+D; play wire=sim. */
     rnet_u8 input_delay;
     /* How many prior INPUT frames to retransmit per packet. */
     rnet_u8 bundle_redundancy;

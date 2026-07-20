@@ -69,8 +69,31 @@ Mismatch flags an input desync; agreement across all slots allows admission.
 Graceful leave. Best-effort UDP (hosts may retransmit a few times on shutdown).
 Peer marks the sender gone and can exit without waiting for the RX timeout.
 
+### STATE_BEGIN (8)
+
+`local_slot : u8`, `op : u8` (0=save store, 1=load apply, 2=SRAM), `slot : u8`,
+`pad : u8`, `xfer_id : u32`, `total_size : u32`, `payload_crc : u32`
+
+Host (slot 0) announces a blob transfer. `op=1/2` stall `try_admit` until the
+guest ACKs; `op=0` is async (sim keeps running). Max size `RNET_STATE_MAX`
+(512 KiB).
+
+### STATE_CHUNK (9)
+
+`local_slot : u8`, `pad : u8×3`, `xfer_id : u32`, `offset : u32`,
+`chunk_size : u16`, `pad : u16`, `bytes : chunk_size` (≤ 1024)
+
+Stop-and-wait data. Host retransmits the chunk at the peer's ACK offset.
+
+### STATE_ACK (10)
+
+`local_slot : u8`, `pad : u8×3`, `xfer_id : u32`, `ack_bytes : u32`
+
+Guest reports contiguous bytes received from offset 0.
+
 ## Wire vs sim
 
-Hosts reason in **sim ticks**. Inputs on the wire are indexed by
-`wire = sim + D`. Admission for sim `T` requires remote rows at wire `T + D`,
-then INPUT_CONFIRM hash agreement on the resolved set.
+Hosts reason in **sim ticks**. Fresh local samples are stored at
+`wire = sim + D`. Admission for sim `T` resolves gameplay from wire `T`
+(inputs sampled at sim `T - D`). `INPUT_CONFIRM` carries a hash of the
+resolved set for async desync detection (does not stall admit).

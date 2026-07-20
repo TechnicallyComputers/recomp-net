@@ -206,6 +206,76 @@ int rnet_proto_encode_bye(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 ses
     return finish_packet(out, c, cap);
 }
 
+int rnet_proto_encode_state_begin(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
+                                  rnet_u8 op, rnet_u8 slot, rnet_u32 xfer_id, rnet_u32 total_size,
+                                  rnet_u32 payload_crc)
+{
+    rnet_u8 *c = out;
+    if (cap < 32)
+    {
+        return -1;
+    }
+    write_u32(&c, magic);
+    write_u16(&c, RNET_PKT_STATE_BEGIN);
+    write_u32(&c, session_id);
+    *c++ = local_slot;
+    *c++ = op;
+    *c++ = slot;
+    *c++ = 0;
+    write_u32(&c, xfer_id);
+    write_u32(&c, total_size);
+    write_u32(&c, payload_crc);
+    return finish_packet(out, c, cap);
+}
+
+int rnet_proto_encode_state_chunk(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
+                                  rnet_u32 xfer_id, rnet_u32 offset, const rnet_u8 *data, rnet_u16 size)
+{
+    rnet_u8 *c = out;
+    if (data == NULL || size == 0 || size > RNET_STATE_CHUNK_MAX)
+    {
+        return -1;
+    }
+    if (cap < 28u + (size_t)size)
+    {
+        return -1;
+    }
+    write_u32(&c, magic);
+    write_u16(&c, RNET_PKT_STATE_CHUNK);
+    write_u32(&c, session_id);
+    *c++ = local_slot;
+    *c++ = 0;
+    *c++ = 0;
+    *c++ = 0;
+    write_u32(&c, xfer_id);
+    write_u32(&c, offset);
+    write_u16(&c, size);
+    write_u16(&c, 0);
+    memcpy(c, data, size);
+    c += size;
+    return finish_packet(out, c, cap);
+}
+
+int rnet_proto_encode_state_ack(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
+                                rnet_u32 xfer_id, rnet_u32 ack_bytes)
+{
+    rnet_u8 *c = out;
+    if (cap < 24)
+    {
+        return -1;
+    }
+    write_u32(&c, magic);
+    write_u16(&c, RNET_PKT_STATE_ACK);
+    write_u32(&c, session_id);
+    *c++ = local_slot;
+    *c++ = 0;
+    *c++ = 0;
+    *c++ = 0;
+    write_u32(&c, xfer_id);
+    write_u32(&c, ack_bytes);
+    return finish_packet(out, c, cap);
+}
+
 int rnet_proto_decode(const rnet_u8 *data, size_t len, rnet_u32 expect_magic, RNetDecodedPacket *out)
 {
     const rnet_u8 *c;
@@ -333,6 +403,48 @@ int rnet_proto_decode(const rnet_u8 *data, size_t len, rnet_u32 expect_magic, RN
         }
         out->local_slot = *c++;
         c += 3;
+        break;
+    case RNET_PKT_STATE_BEGIN:
+        if ((size_t)(end - c) < 16)
+        {
+            return -1;
+        }
+        out->local_slot = *c++;
+        out->state_op = *c++;
+        out->state_slot = *c++;
+        c++;
+        out->state_xfer_id = read_u32(&c);
+        out->state_total_size = read_u32(&c);
+        out->state_payload_crc = read_u32(&c);
+        break;
+    case RNET_PKT_STATE_CHUNK:
+        if ((size_t)(end - c) < 16)
+        {
+            return -1;
+        }
+        out->local_slot = *c++;
+        c += 3;
+        out->state_xfer_id = read_u32(&c);
+        out->state_offset = read_u32(&c);
+        out->state_chunk_size = read_u16(&c);
+        (void)read_u16(&c);
+        if (out->state_chunk_size == 0 || out->state_chunk_size > RNET_STATE_CHUNK_MAX ||
+            (size_t)(end - c) < out->state_chunk_size)
+        {
+            return -1;
+        }
+        memcpy(out->state_chunk, c, out->state_chunk_size);
+        c += out->state_chunk_size;
+        break;
+    case RNET_PKT_STATE_ACK:
+        if ((size_t)(end - c) < 12)
+        {
+            return -1;
+        }
+        out->local_slot = *c++;
+        c += 3;
+        out->state_xfer_id = read_u32(&c);
+        out->state_ack_bytes = read_u32(&c);
         break;
     default:
         return -1;

@@ -161,6 +161,34 @@ void rnet_os_sleep_micros(unsigned usec)
     Sleep((DWORD)(usec / 1000U));
 }
 
+int rnet_os_poll_recv(rnet_socket s, int timeout_ms)
+{
+    WSAPOLLFD pfd;
+    int r;
+
+    if (!rnet_os_socket_valid(s))
+    {
+        return -1;
+    }
+    if (timeout_ms < 0)
+    {
+        timeout_ms = 0;
+    }
+    pfd.fd = s;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    r = WSAPoll(&pfd, 1, timeout_ms);
+    if (r == SOCKET_ERROR)
+    {
+        return -1;
+    }
+    if (r == 0)
+    {
+        return 0;
+    }
+    return ((pfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0) ? 1 : 0;
+}
+
 int rnet_os_last_error(void)
 {
     return (int)WSAGetLastError();
@@ -171,6 +199,7 @@ int rnet_os_last_error(void)
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -285,6 +314,34 @@ void rnet_os_sleep_micros(unsigned usec)
         return;
     }
     usleep(usec);
+}
+
+int rnet_os_poll_recv(rnet_socket s, int timeout_ms)
+{
+    struct pollfd pfd;
+    int r;
+
+    if (!rnet_os_socket_valid(s))
+    {
+        return -1;
+    }
+    if (timeout_ms < 0)
+    {
+        timeout_ms = 0;
+    }
+    pfd.fd = s;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    r = poll(&pfd, 1, timeout_ms);
+    if (r < 0)
+    {
+        return -1;
+    }
+    if (r == 0)
+    {
+        return 0;
+    }
+    return ((pfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0) ? 1 : 0;
 }
 
 int rnet_os_last_error(void)

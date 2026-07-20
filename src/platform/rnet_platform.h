@@ -39,6 +39,8 @@ int rnet_os_sendto(rnet_socket s, const void *buf, size_t len, const struct sock
 rnet_u64 rnet_os_wall_ms(void);
 rnet_u64 rnet_os_monotonic_ms(void);
 void rnet_os_sleep_micros(unsigned usec);
+/* Block until sock is readable or timeout_ms elapses. 1=readable, 0=timeout, -1=error/invalid. */
+int rnet_os_poll_recv(rnet_socket s, int timeout_ms);
 int rnet_os_last_error(void);
 
 /* Parse "host:port" or ":port". host_out may be NULL. Returns 0 on success. */

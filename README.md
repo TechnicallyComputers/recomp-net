@@ -2,7 +2,8 @@
 
 Portable **delay-sync** netcode library for recompilation / modern-runtime hosts
 (N64Recomp, PSX recomp, and similar). Classic lockstep: every peer stalls until
-remote inputs for `wire = sim + D` arrive. Optional **ICE** transport via
+remote inputs for gameplay wire `sim` arrive (fresh samples ride at `sim + D`).
+Optional **ICE** transport via
 [libjuice](https://github.com/paullouisageneau/libjuice).
 
 BattleShip’s netplay stack is a **design reference only** — this repo does not
