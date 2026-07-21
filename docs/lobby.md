@@ -17,6 +17,9 @@ Local bring-up: `ws://127.0.0.1:8765`.
 Host `match_caps` (opaque JSON on create/start) are echoed to guests so
 sim-affecting settings stay aligned; see `recomp-net-server/docs/WS_LOBBY.md`.
 
+Lobbies also carry `game_name` + `game_version` (release pin). Create/join
+must match; `list` can filter by either. Empty version normalizes to `dev`.
+
 ## Summary (for host integrators)
 
 - One WebSocket per player; text frames are JSON objects with an `"op"` field.
