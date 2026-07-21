@@ -24,10 +24,10 @@ while (running) {
 **Rule:** only one authoritative sim tick may advance after a successful
 `try_admit`. Do not sample pads for tick `T+1` until `advance` has run.
 
-`try_admit` **latches** a fresh local pad at wire `T+D`, resolves gameplay
-from wire `T`, and `publish`es when remotes for wire `T` are present.
-`INPUT_CONFIRM` is async (desync flag via `rnet_session_input_desync`); it
-does not block admit. Remote INPUT frames are first-wins.
+`try_admit` **latches** the local pad once per wire tick (re-admits reuse it)
+and waits for **INPUT_CONFIRM** hash agreement across all slots before
+`publish`. Remote INPUT frames are first-wins. If hashes disagree, admission
+stalls permanently for the session; poll with `rnet_session_input_desync`.
 
 On host shutdown call `rnet_session_send_bye` before destroy so the peer can
 exit immediately. While waiting on admit, poll
@@ -51,18 +51,12 @@ and leave the session instead of spinning forever.
   does not fix host desyncs.
 - Prefer a single thread that owns both `pump` and sim advance, or protect the
   session with an external mutex (API is not internally locked).
+- After LOAD: ready probe first (both applied), then each peer
+  `hard_resync` (clears remotes) + `prime_delay_inputs` once at mutual ready.
+  Keep the app barrier up until `try_admit` succeeds on **both** peers.
 
 ## Config
 
 `RNetConfig` fields (`slot_count`, `local_slot`, `input_delay`,
 `bundle_redundancy`, `session_id`, `protocol_magic`) must match across peers
 except `local_slot`. Negotiate them out-of-band (lobby) before `create`.
-
-## Savestate / SRAM transfer (optional)
-
-Host slot 0 may call `rnet_session_state_begin(op, slot, blob, size)` while
-`RUNNING` (`op`: save / load / SRAM). Load and SRAM stall `try_admit` until the
-guest ACKs; save does not. Chunks use a sliding window with contiguous ACK.
-When `rnet_session_state_take_ready` returns 1, the guest (and host, if it has
-not already applied) should store/apply the blob, then
-`rnet_session_state_finish(s, hard_resync)` — use `hard_resync=1` on load.

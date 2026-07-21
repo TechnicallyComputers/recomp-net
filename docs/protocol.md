@@ -69,31 +69,50 @@ Mismatch flags an input desync; agreement across all slots allows admission.
 Graceful leave. Best-effort UDP (hosts may retransmit a few times on shutdown).
 Peer marks the sender gone and can exit without waiting for the RX timeout.
 
-### STATE_BEGIN (8)
+### STATE_BEGIN (8) / STATE_CHUNK (9) / STATE_ACK (10)
 
-`local_slot : u8`, `op : u8` (0=save store, 1=load apply, 2=SRAM), `slot : u8`,
-`pad : u8`, `xfer_id : u32`, `total_size : u32`, `payload_crc : u32`
+Host→guest chunked blob transfer (savestate / memcard / SRAM). Cap:
+`RNET_STATE_MAX` (8 MiB). Chunk payload ≤ `RNET_STATE_CHUNK_MAX` (1024).
 
-Host (slot 0) announces a blob transfer. `op=1/2` stall `try_admit` until the
-guest ACKs; `op=0` is async (sim keeps running). Max size `RNET_STATE_MAX`
-(512 KiB).
+**BEGIN:** `local_slot`, `op`, `slot`, `pad`, `xfer_id : u32`, `total_size : u32`,
+`payload_crc : u32` (`rnet_proto_checksum` over the full blob).
 
-### STATE_CHUNK (9)
+**CHUNK:** `local_slot`, pad×3, `xfer_id`, `offset : u32`, `size : u16`, pad u16,
+`data[size]`.
 
-`local_slot : u8`, `pad : u8×3`, `xfer_id : u32`, `offset : u32`,
-`chunk_size : u16`, `pad : u16`, `bytes : chunk_size` (≤ 1024)
+**ACK:** `local_slot`, pad×3, `xfer_id`, `ack_bytes : u32` (contiguous bytes from 0).
 
-Stop-and-wait data. Host retransmits the chunk at the peer's ACK offset.
+Guest marks ready only after full contiguous receive **and** CRC match. Admit
+stalls for the whole transfer.
 
-### STATE_ACK (10)
+`op`: `0=SAVE`, `1=LOAD`, `2=SRAM`.
 
-`local_slot : u8`, `pad : u8×3`, `xfer_id : u32`, `ack_bytes : u32`
+### STATE_PROBE (11) / STATE_PROBE_REPLY (12)
 
-Guest reports contiguous bytes received from offset 0.
+Hash-agree before transfer. Host announces; guest replies; skip BEGIN/CHUNK when
+identical.
+
+**PROBE:** `local_slot`, `op`, `slot`, `pad`, `total_size : u32`, `payload_crc : u32`.
+
+- `op=SAVE`, `total_size == 0`: coordinate local save first (guest ACKs when its
+  local write is done). Does **not** stall admit (deferred saves must still
+  reach a block boundary).
+- `op=LOAD`, `total_size == 0`: post-load ready rendezvous (not a content hash).
+  Host stalls admit until the guest ACKs.
+- Hash probes (`total_size != 0`): stall until agree or transfer.
+
+**PROBE_REPLY:** `local_slot`, `op`, `slot`, `match : u8` (1 = agree / coord done).
+
+On hash miss the host starts STATE_BEGIN.
+
+After a LOAD restore, both peers ACK a ready probe, then each calls
+`rnet_session_hard_resync` (clear local **and** remote rings, `sim_tick → 0`)
+and `rnet_session_prime_delay_inputs` once at mutual ready — not at apply
+time. Both stay in the app load barrier until `try_admit` succeeds (fresh
+tip + INPUT_CONFIRM). Ready-probe retransmit interval is 8 ms.
 
 ## Wire vs sim
 
-Hosts reason in **sim ticks**. Fresh local samples are stored at
-`wire = sim + D`. Admission for sim `T` resolves gameplay from wire `T`
-(inputs sampled at sim `T - D`). `INPUT_CONFIRM` carries a hash of the
-resolved set for async desync detection (does not stall admit).
+Hosts reason in **sim ticks**. Inputs on the wire are indexed by
+`wire = sim + D`. Admission for sim `T` requires remote rows at wire `T + D`,
+then INPUT_CONFIRM hash agreement on the resolved set.

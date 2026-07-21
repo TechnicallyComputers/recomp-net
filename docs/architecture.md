@@ -28,17 +28,15 @@ signaled ready.
 For sim tick `T` and committed delay `D`:
 
 1. Host calls `rnet_session_try_admit(s, T)`.
-2. Library samples local input and stores it at **wire tick** `T + D`
-   (for use when admitting sim `T + D` later).
-3. Admission for sim `T` resolves gameplay from **wire tick** `T` (local +
-   every remote). Those rows were produced when peers were at sim `T - D`
-   (wire `0..D-1` are seeded neutral at `START`).
-4. On success, `publish(T, …)` runs immediately; `INPUT_CONFIRM` is emitted
-   for async desync detection and does **not** stall admit.
-5. On failure (remote wire `T` missing), return `0` and keep pumping.
+2. Library samples local input and stores it at **wire tick** `T + D`.
+3. Admission succeeds only when every **remote** slot has a valid ring row for
+   wire tick `T + D`.
+4. On success, `publish(T, by_slot, …)` is invoked with gameplay-indexed
+   samples; host runs one sim step, then `rnet_session_advance`.
+5. On failure, return `0` and keep calling `rnet_session_pump` (ingress /
+   retransmit continue while the sim stalls).
 
-There is no prediction window in v1. `D` pipelines input exchange so peers
-can overlap guest work instead of rendezvousing on the same tick.
+There is no prediction window in v1.
 
 ## Transport mux
 

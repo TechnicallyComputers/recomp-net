@@ -46,19 +46,19 @@ int main(void)
     expect_true(rnet_ring_get(&ring, 10 + RNET_HISTORY_LENGTH, &got) == 1, "wrapped tick present");
     expect_true(rnet_ring_highest_valid(&ring) == 10 + RNET_HISTORY_LENGTH, "highest valid");
 
-    /* Sample wire = sim + D; gameplay/admit reads wire = sim. */
+    /* Admission mapping: remote wire for sim must equal sim + D. */
     for (sim = 0; sim < 8; ++sim)
     {
         wire = rnet_wire_tick_from_sim(sim, delay);
-        expect_true(wire == sim + delay, "sample wire = sim + D");
+        expect_true(wire == sim + delay, "wire = sim + D");
         memset(&sample, 0, sizeof(sample));
-        sample.tick = sim; /* play wire */
+        sample.tick = wire;
         sample.size = 1;
         sample.bytes[0] = (rnet_u8)sim;
         sample.valid = 1;
         rnet_ring_store(&ring, &sample);
-        expect_true(rnet_ring_get(&ring, sim, &got) == 1, "play wire present for admit");
-        expect_true(got.bytes[0] == (rnet_u8)sim, "play payload matches sim");
+        expect_true(rnet_ring_get(&ring, wire, &got) == 1, "remote wire row present for admit");
+        expect_true(got.bytes[0] == (rnet_u8)sim, "wire payload matches sim");
     }
 
     if (g_failures == 0)

@@ -10,8 +10,12 @@ protocol:
 - `recomp-net-server/docs/WS_LOBBY.md`
 - Architecture: `recomp-net-server/docs/HOW_IT_WORKS.md`
 
-Default client URL: `ws://127.0.0.1:8765`  
-Override with env `PSX_NET_LOBBY_URL`.
+Default client URL: `ws://netplay.technicallycomputers.ca:8765`  
+Override with env `PSX_NET_LOBBY_URL` (PSX) or `SNES_NET_LOBBY_URL` (SNES).
+Local bring-up: `ws://127.0.0.1:8765`.
+
+Host `match_caps` (opaque JSON on create/start) are echoed to guests so
+sim-affecting settings stay aligned; see `recomp-net-server/docs/WS_LOBBY.md`.
 
 ## Summary (for host integrators)
 

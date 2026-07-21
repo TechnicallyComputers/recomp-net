@@ -14,6 +14,11 @@ const char *rnet_version_string(void)
     return "0.1.0";
 }
 
+rnet_u32 rnet_checksum(const void *data, size_t len)
+{
+    return rnet_proto_checksum((const rnet_u8 *)data, len);
+}
+
 typedef enum RNetSessionPhase
 {
     RNET_PHASE_IDLE = 0,
@@ -61,7 +66,7 @@ struct RNetSession
     int state_active;
     int state_sender;
     int state_ready;
-    int state_stall_sim; /* LOAD/SRAM stall admit; SAVE does not */
+    int state_stall_sim; /* probe + all transfers stall admit until finished */
     rnet_u8 state_op;
     rnet_u8 state_slot;
     rnet_u32 state_xfer_id;
@@ -72,14 +77,25 @@ struct RNetSession
     rnet_u32 state_peer_ack;   /* sender: peer contiguous ACK */
     rnet_u32 state_send_cursor;
     rnet_u8 *state_buf;
-    rnet_u8 state_rx_bits[64]; /* 512 chunk bits for OOO reassembly */
+    rnet_u8 state_rx_bits[(RNET_STATE_MAX_CHUNKS + 7u) / 8u];
     rnet_u64 state_last_tx_ms;
     rnet_u64 state_last_ack_ms;
     rnet_u64 state_last_begin_ms;
-    /* Last published sim tick + hash (async INPUT_CONFIRM verify). */
-    rnet_u32 last_pub_tick;
-    rnet_u32 last_pub_hash;
-    int last_pub_valid;
+    /* Hash probe before transfer (host announce → guest reply). */
+    int state_probe_active;
+    int state_probe_sender;
+    int state_probe_reply_ready; /* host: guest answered */
+    int state_probe_pending;     /* guest: awaiting app reply */
+    int state_probe_match;
+    rnet_u8 state_probe_op;
+    rnet_u8 state_probe_slot;
+    rnet_u32 state_probe_size;
+    rnet_u32 state_probe_crc;
+    rnet_u64 state_probe_last_tx_ms;
+    /* When set, pump must not emit INPUT bundles. Used across LOAD apply/ready
+     * so pre-resync tip rows cannot clobber the post-hard_resync epoch
+     * (tick % RNET_HISTORY_LENGTH collisions). Cleared by prime_delay_inputs. */
+    int input_send_suppress;
 };
 
 static rnet_u64 session_now(RNetSession *s)
@@ -92,14 +108,16 @@ static rnet_u64 session_now(RNetSession *s)
 }
 
 static void send_raw(RNetSession *s, const rnet_u8 *buf, int len);
-static void send_input_bundle(RNetSession *s);
-static void seed_delay_prefix(RNetSession *s);
 static void state_clear(RNetSession *s);
+static void state_probe_clear(RNetSession *s);
 static void state_send_ack(RNetSession *s);
 static void state_drive_sender(RNetSession *s);
+static void state_drive_probe(RNetSession *s);
 static void state_on_begin(RNetSession *s, const RNetDecodedPacket *pkt);
 static void state_on_chunk(RNetSession *s, const RNetDecodedPacket *pkt);
 static void state_on_ack(RNetSession *s, const RNetDecodedPacket *pkt);
+static void state_on_probe(RNetSession *s, const RNetDecodedPacket *pkt);
+static void state_on_probe_reply(RNetSession *s, const RNetDecodedPacket *pkt);
 
 #if defined(RNET_ENABLE_ICE)
 static void ice_emit_bridge(const RNetSignal *msg, void *user)
@@ -122,11 +140,39 @@ static int ice_recv_bridge(void *ice_ctx, rnet_u8 *buf, size_t cap, size_t *out_
 }
 #endif /* RNET_ENABLE_ICE */
 
+static int remote_tick_in_live_window(const RNetSession *s, rnet_u32 tick)
+{
+    rnet_u32 tip;
+    rnet_u32 slop;
+    rnet_u32 lo;
+    rnet_u32 hi;
+    if (s == NULL || s->phase != RNET_PHASE_RUNNING)
+    {
+        return 1;
+    }
+    tip = rnet_wire_tick_from_sim(s->sim_tick, s->delay);
+    slop = (rnet_u32)s->cfg.bundle_redundancy + 8u;
+    if (slop < 8u)
+    {
+        slop = 8u;
+    }
+    lo = (s->sim_tick > slop) ? (s->sim_tick - slop) : 0u;
+    hi = tip + slop;
+    return (tick >= lo && tick <= hi) ? 1 : 0;
+}
+
 static void store_remote_frame(RNetSession *s, rnet_u8 slot, const RNetWireFrame *frame)
 {
     RNetInputSample sample;
     RNetInputSample existing;
     if ((s == NULL) || (frame == NULL) || (slot >= s->cfg.slot_count) || (slot == s->cfg.local_slot))
+    {
+        return;
+    }
+    /* Drop previous-epoch residue after hard_resync (sim_tick→0). Those ticks
+     * share ring slots with the new tip via tick%HISTORY and first-wins would
+     * otherwise keep remotes_ready_for_sim failing until the peer stops. */
+    if (!remote_tick_in_live_window(s, frame->tick))
     {
         return;
     }
@@ -191,6 +237,27 @@ static void send_input_confirm(RNetSession *s)
     s->last_confirm_ms = now;
 }
 
+static int confirms_agree(const RNetSession *s)
+{
+    rnet_u8 slot;
+    if ((s == NULL) || !s->confirm_active)
+    {
+        return 0;
+    }
+    for (slot = 0; slot < s->cfg.slot_count; ++slot)
+    {
+        if (!s->confirm_seen[slot])
+        {
+            return 0;
+        }
+        if (s->peer_confirm_hash[slot] != s->confirm_hash)
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
 {
     int i;
@@ -226,9 +293,6 @@ static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
         {
             s->sim_tick = pkt->start_tick;
             s->phase = RNET_PHASE_RUNNING;
-            /* Seed wire 0..D-1 so admit(T) can read gameplay at wire=T. */
-            seed_delay_prefix(s);
-            send_input_bundle(s);
         }
         break;
     case RNET_PKT_INPUT:
@@ -249,20 +313,15 @@ static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
         }
         break;
     case RNET_PKT_INPUT_CONFIRM:
-        if (pkt->local_slot < s->cfg.slot_count)
+        if (pkt->local_slot < s->cfg.slot_count && pkt->confirm_sim_tick == s->sim_tick)
         {
-            if (pkt->confirm_sim_tick == s->sim_tick)
-            {
-                s->confirm_seen[pkt->local_slot] = 1;
-                s->peer_confirm_hash[pkt->local_slot] = pkt->confirm_hash;
-            }
-            /* Async verify: peer may confirm a tick we already published. */
-            if (s->last_pub_valid && pkt->confirm_sim_tick == s->last_pub_tick &&
-                pkt->confirm_hash != s->last_pub_hash)
+            s->confirm_seen[pkt->local_slot] = 1;
+            s->peer_confirm_hash[pkt->local_slot] = pkt->confirm_hash;
+            if (s->confirm_active && pkt->confirm_hash != s->confirm_hash)
             {
                 s->input_desync = 1;
-                s->desync_tick = pkt->confirm_sim_tick;
-                s->desync_local_hash = s->last_pub_hash;
+                s->desync_tick = s->sim_tick;
+                s->desync_local_hash = s->confirm_hash;
                 s->desync_remote_hash = pkt->confirm_hash;
             }
         }
@@ -281,6 +340,12 @@ static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
         break;
     case RNET_PKT_STATE_ACK:
         state_on_ack(s, pkt);
+        break;
+    case RNET_PKT_STATE_PROBE:
+        state_on_probe(s, pkt);
+        break;
+    case RNET_PKT_STATE_PROBE_REPLY:
+        state_on_probe_reply(s, pkt);
         break;
     default:
         break;
@@ -318,6 +383,28 @@ static void pump_recv(RNetSession *s)
     }
 }
 
+static void state_probe_clear(RNetSession *s)
+{
+    if (s == NULL)
+    {
+        return;
+    }
+    s->state_probe_active = 0;
+    s->state_probe_sender = 0;
+    s->state_probe_reply_ready = 0;
+    s->state_probe_pending = 0;
+    s->state_probe_match = 0;
+    s->state_probe_op = 0;
+    s->state_probe_slot = 0;
+    s->state_probe_size = 0;
+    s->state_probe_crc = 0;
+    s->state_probe_last_tx_ms = 0;
+    if (!s->state_active)
+    {
+        s->state_stall_sim = 0;
+    }
+}
+
 static void state_clear(RNetSession *s)
 {
     if (s == NULL)
@@ -329,7 +416,7 @@ static void state_clear(RNetSession *s)
     s->state_active = 0;
     s->state_sender = 0;
     s->state_ready = 0;
-    s->state_stall_sim = 0;
+    s->state_stall_sim = s->state_probe_active ? 1 : 0;
     s->state_op = 0;
     s->state_slot = 0;
     s->state_xfer_id = 0;
@@ -346,7 +433,7 @@ static void state_clear(RNetSession *s)
 
 static void state_rx_set_chunk(RNetSession *s, rnet_u32 chunk_index)
 {
-    if (chunk_index >= 512u)
+    if (chunk_index >= RNET_STATE_MAX_CHUNKS)
     {
         return;
     }
@@ -355,7 +442,7 @@ static void state_rx_set_chunk(RNetSession *s, rnet_u32 chunk_index)
 
 static int state_rx_has_chunk(const RNetSession *s, rnet_u32 chunk_index)
 {
-    if (chunk_index >= 512u)
+    if (chunk_index >= RNET_STATE_MAX_CHUNKS)
     {
         return 0;
     }
@@ -507,6 +594,7 @@ static void state_on_begin(RNetSession *s, const RNetDecodedPacket *pkt)
         state_send_ack(s);
         return;
     }
+    state_probe_clear(s); /* hash-miss path: transfer replaces probe */
     state_clear(s);
     s->state_buf = (rnet_u8 *)malloc(pkt->state_total_size);
     if (s->state_buf == NULL)
@@ -585,6 +673,93 @@ static void state_on_ack(RNetSession *s, const RNetDecodedPacket *pkt)
     state_mark_ready_if_complete(s);
 }
 
+static void state_drive_probe(RNetSession *s)
+{
+    rnet_u8 buf[64];
+    int n;
+    rnet_u64 now;
+
+    if (!s->state_probe_active || !s->state_probe_sender || s->state_probe_reply_ready)
+    {
+        return;
+    }
+    now = session_now(s);
+    /* Ready/hash probes: snappy retransmit — 40ms left a visible post-load hitch. */
+    if (s->state_probe_last_tx_ms != 0 && now - s->state_probe_last_tx_ms < 8ULL)
+    {
+        return;
+    }
+    n = rnet_proto_encode_state_probe(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id,
+                                      s->cfg.local_slot, s->state_probe_op, s->state_probe_slot,
+                                      s->state_probe_size, s->state_probe_crc);
+    if (n > 0)
+    {
+        send_raw(s, buf, n);
+        s->state_probe_last_tx_ms = now;
+    }
+}
+
+static void state_on_probe(RNetSession *s, const RNetDecodedPacket *pkt)
+{
+    if (pkt->local_slot == s->cfg.local_slot)
+    {
+        return;
+    }
+    if (s->cfg.local_slot == 0)
+    {
+        return; /* host never receives PROBE */
+    }
+    if (s->state_active)
+    {
+        return; /* transfer in flight takes precedence */
+    }
+    /* Retransmit of a probe we already answered — resend REPLY, do not re-arm. */
+    if (s->state_probe_active && !s->state_probe_sender && !s->state_probe_pending &&
+        s->state_probe_op == pkt->state_op && s->state_probe_slot == pkt->state_slot &&
+        s->state_probe_size == pkt->state_total_size && s->state_probe_crc == pkt->state_payload_crc)
+    {
+        rnet_u8 buf[64];
+        int n = rnet_proto_encode_state_probe_reply(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id,
+                                                    s->cfg.local_slot, s->state_probe_op, s->state_probe_slot,
+                                                    s->state_probe_match ? 1u : 0u);
+        if (n > 0)
+        {
+            send_raw(s, buf, n);
+        }
+        return;
+    }
+    /* Fresh probe — surface to the app. size==0 (coord save) must not stall
+     * admit or deferred savestate_poll never runs (deadlock). */
+    s->state_probe_active = 1;
+    s->state_probe_sender = 0;
+    s->state_probe_pending = 1;
+    s->state_probe_reply_ready = 0;
+    s->state_probe_match = 0;
+    s->state_probe_op = pkt->state_op;
+    s->state_probe_slot = pkt->state_slot;
+    s->state_probe_size = pkt->state_total_size;
+    s->state_probe_crc = pkt->state_payload_crc;
+    s->state_stall_sim = (pkt->state_total_size != 0) ? 1 : 0;
+}
+
+static void state_on_probe_reply(RNetSession *s, const RNetDecodedPacket *pkt)
+{
+    if (!s->state_probe_active || !s->state_probe_sender)
+    {
+        return;
+    }
+    if (pkt->local_slot == s->cfg.local_slot)
+    {
+        return;
+    }
+    if (pkt->state_op != s->state_probe_op || pkt->state_slot != s->state_probe_slot)
+    {
+        return;
+    }
+    s->state_probe_match = pkt->state_probe_match ? 1 : 0;
+    s->state_probe_reply_ready = 1;
+}
+
 static void maybe_bootstrap(RNetSession *s)
 {
     rnet_u8 buf[RNET_MAX_PACKET];
@@ -632,8 +807,6 @@ static void maybe_bootstrap(RNetSession *s)
             s->start_sent = 1;
             s->sim_tick = 0;
             s->phase = RNET_PHASE_RUNNING;
-            seed_delay_prefix(s);
-            send_input_bundle(s);
         }
     }
 }
@@ -650,6 +823,11 @@ static void send_input_bundle(RNetSession *s)
     rnet_u64 now = session_now(s);
 
     if (s->phase != RNET_PHASE_RUNNING)
+    {
+        return;
+    }
+    /* Stall or explicit suppress: do not emit pre-resync tips during load. */
+    if (s->state_stall_sim || s->input_send_suppress)
     {
         return;
     }
@@ -693,9 +871,9 @@ static void send_input_bundle(RNetSession *s)
     s->last_input_ms = now;
 }
 
-/* Gameplay inputs for sim T live at wire T (sampled when peers were at T-D). */
-static int remotes_ready_for_play_wire(RNetSession *s, rnet_u32 play_wire)
+static int remotes_ready_for_sim(RNetSession *s, rnet_u32 sim_tick)
 {
+    rnet_u32 wire = rnet_wire_tick_from_sim(sim_tick, s->delay);
     rnet_u8 slot;
     RNetInputSample tmp;
 
@@ -705,37 +883,12 @@ static int remotes_ready_for_play_wire(RNetSession *s, rnet_u32 play_wire)
         {
             continue;
         }
-        if (!rnet_ring_get(&s->remote_rings[slot], play_wire, &tmp))
+        if (!rnet_ring_get(&s->remote_rings[slot], wire, &tmp))
         {
             return 0;
         }
     }
     return 1;
-}
-
-/* Prefill local wire 0..D-1 with a deterministic zero pad so admit(0..D-1)
- * can resolve gameplay without a same-tick peer rendezvous. Must not call
- * sample_local — host pads can differ across peers and would desync tick 0. */
-static void seed_delay_prefix(RNetSession *s)
-{
-    rnet_u32 t;
-    if ((s == NULL) || (s->delay == 0))
-    {
-        return;
-    }
-    for (t = 0; t < (rnet_u32)s->delay; ++t)
-    {
-        RNetInputSample sample;
-        if (rnet_ring_get(&s->local_ring, t, &sample))
-        {
-            continue;
-        }
-        memset(&sample, 0, sizeof(sample));
-        sample.tick = t;
-        sample.valid = 1;
-        sample.size = 0;
-        rnet_ring_store(&s->local_ring, &sample);
-    }
 }
 
 RNetSession *rnet_session_create(const RNetConfig *cfg, const RNetHostVTable *host)
@@ -850,9 +1003,27 @@ void rnet_session_pump(RNetSession *s)
     }
     pump_recv(s);
     maybe_bootstrap(s);
+    if (s->state_probe_active)
+    {
+        state_drive_probe(s);
+    }
     if (s->state_active)
     {
         state_drive_sender(s);
+    }
+    /* LOAD apply/ready suppresses INPUT; emit HELLO so peers keep stamping
+     * last_peer_rx_ms (hash-match apply of a multi‑MB .pst is otherwise silent). */
+    if (s->phase == RNET_PHASE_RUNNING && (s->input_send_suppress || s->state_stall_sim))
+    {
+        rnet_u64 now = session_now(s);
+        if (now - s->last_hello_ms >= 250ULL)
+        {
+            rnet_u8 buf[RNET_MAX_PACKET];
+            int len = rnet_proto_encode_hello(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id,
+                                              s->cfg.local_slot, s->cfg.slot_count, s->delay);
+            send_raw(s, buf, len);
+            s->last_hello_ms = now;
+        }
     }
     send_input_bundle(s);
 }
@@ -884,20 +1055,19 @@ int rnet_session_wait_recv(RNetSession *s, int timeout_ms)
 int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick)
 {
     RNetInputSample resolved[RNET_MAX_SLOTS];
-    RNetInputSample local_play;
-    RNetInputSample local_future;
-    rnet_u32 play_wire;
-    rnet_u32 sample_wire;
+    RNetInputSample local;
+    rnet_u32 wire;
     rnet_u32 hash;
     rnet_u8 slot;
+    rnet_u64 now;
 
     if ((s == NULL) || (s->phase != RNET_PHASE_RUNNING))
     {
         return 0;
     }
-    if (s->state_active && s->state_stall_sim)
+    if (s->state_stall_sim && (s->state_active || s->state_probe_active))
     {
-        /* Stall sim for LOAD/SRAM until the guest has the blob. SAVE is async. */
+        /* Stall while probe or chunked transfer is in flight. */
         return 0;
     }
     if (sim_tick != s->sim_tick)
@@ -910,41 +1080,22 @@ int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick)
         return 0;
     }
 
-    /* Classic delay-sync: gameplay for sim T uses wire T (sampled at T-D).
-     * Fresh local input is stored at wire T+D for a future admit. The old
-     * path required remote wire T+D at admit(T) — a same-tick rendezvous that
-     * made D a no-op and serialized MotK FMV on one machine (~40 vs ~59). */
-    play_wire = sim_tick;
-    sample_wire = rnet_wire_tick_from_sim(sim_tick, s->delay);
-
-    if (!rnet_ring_get(&s->local_ring, sample_wire, &local_future))
+    wire = rnet_wire_tick_from_sim(sim_tick, s->delay);
+    /* Latch local once per wire tick; re-admits reuse the stored sample. */
+    if (!rnet_ring_get(&s->local_ring, wire, &local))
     {
-        memset(&local_future, 0, sizeof(local_future));
-        s->host.sample_local(sim_tick, &local_future, s->host.ctx);
-        local_future.tick = sample_wire;
-        local_future.valid = 1;
-        if (local_future.size > RNET_INPUT_MAX)
+        memset(&local, 0, sizeof(local));
+        s->host.sample_local(sim_tick, &local, s->host.ctx);
+        local.tick = wire;
+        local.valid = 1;
+        if (local.size > RNET_INPUT_MAX)
         {
-            local_future.size = RNET_INPUT_MAX;
+            local.size = RNET_INPUT_MAX;
         }
-        rnet_ring_store(&s->local_ring, &local_future);
+        rnet_ring_store(&s->local_ring, &local);
     }
 
-    if (!rnet_ring_get(&s->local_ring, play_wire, &local_play))
-    {
-        /* D=0: play_wire == sample_wire and we just stored it. */
-        if (play_wire == sample_wire)
-        {
-            local_play = local_future;
-        }
-        else
-        {
-            send_input_bundle(s);
-            return 0;
-        }
-    }
-
-    if (!remotes_ready_for_play_wire(s, play_wire))
+    if (!remotes_ready_for_sim(s, sim_tick))
     {
         send_input_bundle(s);
         return 0;
@@ -955,13 +1106,13 @@ int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick)
     {
         if (slot == s->cfg.local_slot)
         {
-            resolved[slot] = local_play;
+            resolved[slot] = local;
             resolved[slot].tick = sim_tick;
         }
         else
         {
             RNetInputSample remote;
-            if (!rnet_ring_get(&s->remote_rings[slot], play_wire, &remote))
+            if (!rnet_ring_get(&s->remote_rings[slot], wire, &remote))
             {
                 return 0;
             }
@@ -972,36 +1123,79 @@ int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick)
 
     hash = hash_resolved_inputs(sim_tick, resolved, (int)s->cfg.slot_count);
 
-    /* Emit INPUT_CONFIRM for async desync detection, but do not stall admit on
-     * peer CONFIRM — waiting forced a frame barrier after every guest quantum. */
-    s->confirm_active = 1;
-    s->confirm_sim_tick = sim_tick;
-    s->confirm_hash = hash;
-    s->confirm_seen[s->cfg.local_slot] = 1;
-    s->peer_confirm_hash[s->cfg.local_slot] = hash;
-    for (slot = 0; slot < s->cfg.slot_count; ++slot)
+    if (!s->confirm_active || s->confirm_sim_tick != sim_tick)
     {
-        if (slot == s->cfg.local_slot)
-        {
-            continue;
-        }
-        if (s->confirm_seen[slot] && s->peer_confirm_hash[slot] != hash)
-        {
-            s->input_desync = 1;
-            s->desync_tick = sim_tick;
-            s->desync_local_hash = hash;
-            s->desync_remote_hash = s->peer_confirm_hash[slot];
-            s->confirm_active = 0;
-            return 0;
-        }
-    }
-    send_input_confirm(s);
-    send_input_bundle(s);
+        /* Peer INPUT_CONFIRM may arrive before we activate. Preserve those
+         * same-tick sightings — wiping them races the slower peer into a
+         * permanent stall once the faster peer admits and stops retransmit. */
+        rnet_u8 saved_seen[RNET_MAX_SLOTS];
+        rnet_u32 saved_hash[RNET_MAX_SLOTS];
+        memcpy(saved_seen, s->confirm_seen, sizeof(saved_seen));
+        memcpy(saved_hash, s->peer_confirm_hash, sizeof(saved_hash));
 
-    s->host.publish(sim_tick, resolved, (int)s->cfg.slot_count, s->host.ctx);
-    s->last_pub_tick = sim_tick;
-    s->last_pub_hash = hash;
-    s->last_pub_valid = 1;
+        s->confirm_active = 1;
+        s->confirm_sim_tick = sim_tick;
+        s->confirm_hash = hash;
+        memcpy(s->confirm_resolved, resolved, sizeof(resolved));
+        memset(s->confirm_seen, 0, sizeof(s->confirm_seen));
+        memset(s->peer_confirm_hash, 0, sizeof(s->peer_confirm_hash));
+        for (slot = 0; slot < s->cfg.slot_count; ++slot)
+        {
+            if (slot == s->cfg.local_slot)
+            {
+                continue;
+            }
+            if (saved_seen[slot])
+            {
+                s->confirm_seen[slot] = 1;
+                s->peer_confirm_hash[slot] = saved_hash[slot];
+                if (saved_hash[slot] != hash)
+                {
+                    s->input_desync = 1;
+                    s->desync_tick = sim_tick;
+                    s->desync_local_hash = hash;
+                    s->desync_remote_hash = saved_hash[slot];
+                    return 0;
+                }
+            }
+        }
+        s->confirm_seen[s->cfg.local_slot] = 1;
+        s->peer_confirm_hash[s->cfg.local_slot] = hash;
+        send_input_confirm(s);
+        send_input_bundle(s);
+        /* Peer CONFIRM may already be in saved_seen (arrived before we
+         * activated). Admit immediately when everyone already agrees. */
+        if (confirms_agree(s))
+        {
+            s->host.publish(sim_tick, s->confirm_resolved, (int)s->cfg.slot_count, s->host.ctx);
+            s->confirm_active = 0;
+            return 1;
+        }
+        return 0;
+    }
+
+    if (hash != s->confirm_hash)
+    {
+        s->input_desync = 1;
+        s->desync_tick = sim_tick;
+        s->desync_local_hash = hash;
+        s->desync_remote_hash = s->confirm_hash;
+        return 0;
+    }
+
+    now = session_now(s);
+    if (now - s->last_confirm_ms >= 4ULL)
+    {
+        send_input_confirm(s);
+    }
+
+    if (!confirms_agree(s))
+    {
+        send_input_bundle(s);
+        return 0;
+    }
+
+    s->host.publish(sim_tick, s->confirm_resolved, (int)s->cfg.slot_count, s->host.ctx);
     s->confirm_active = 0;
     return 1;
 }
@@ -1133,6 +1327,133 @@ RNetIceState rnet_session_ice_state(const RNetSession *s)
     return rnet_ice_agent_state(s->ice);
 }
 
+int rnet_session_state_probe(RNetSession *s, rnet_u8 op, rnet_u8 slot, rnet_u32 total_size, rnet_u32 payload_crc)
+{
+    if ((s == NULL) || s->cfg.local_slot != 0 || s->phase != RNET_PHASE_RUNNING)
+    {
+        return -1;
+    }
+    if (s->state_active || (s->state_probe_active && s->state_probe_sender && !s->state_probe_reply_ready))
+    {
+        return -1;
+    }
+    if (op != RNET_STATE_OP_SAVE && op != RNET_STATE_OP_LOAD && op != RNET_STATE_OP_SRAM)
+    {
+        return -1;
+    }
+    if (total_size > RNET_STATE_MAX)
+    {
+        return -1;
+    }
+
+    state_probe_clear(s);
+    s->state_probe_active = 1;
+    s->state_probe_sender = 1;
+    s->state_probe_reply_ready = 0;
+    s->state_probe_pending = 0;
+    s->state_probe_match = 0;
+    s->state_probe_op = op;
+    s->state_probe_slot = slot;
+    s->state_probe_size = total_size;
+    s->state_probe_crc = payload_crc;
+    s->state_probe_last_tx_ms = 0;
+    /* SAVE coord (size==0): keep sim running so deferred savestate_poll can run.
+     * LOAD size==0: post-load ready rendezvous — host stalls until guest ACKs.
+     * Hash probe (size!=0): stall until agree or transfer. */
+    if (total_size != 0)
+        s->state_stall_sim = 1;
+    else if (op == RNET_STATE_OP_LOAD)
+        s->state_stall_sim = 1;
+    else
+        s->state_stall_sim = 0;
+    state_drive_probe(s);
+    return 0;
+}
+
+int rnet_session_state_probe_take_reply(RNetSession *s, int *match_out)
+{
+    if ((s == NULL) || !s->state_probe_active || !s->state_probe_sender || !s->state_probe_reply_ready)
+    {
+        return 0;
+    }
+    if (match_out)
+    {
+        *match_out = s->state_probe_match;
+    }
+    return 1;
+}
+
+int rnet_session_state_probe_pending(const RNetSession *s, rnet_u8 *op_out, rnet_u8 *slot_out, rnet_u32 *size_out,
+                                     rnet_u32 *crc_out)
+{
+    if ((s == NULL) || !s->state_probe_active || !s->state_probe_pending)
+    {
+        return 0;
+    }
+    if (op_out)
+    {
+        *op_out = s->state_probe_op;
+    }
+    if (slot_out)
+    {
+        *slot_out = s->state_probe_slot;
+    }
+    if (size_out)
+    {
+        *size_out = s->state_probe_size;
+    }
+    if (crc_out)
+    {
+        *crc_out = s->state_probe_crc;
+    }
+    return 1;
+}
+
+int rnet_session_state_probe_reply(RNetSession *s, int match)
+{
+    rnet_u8 buf[64];
+    int n;
+
+    if ((s == NULL) || !s->state_probe_active || s->state_probe_sender || !s->state_probe_pending)
+    {
+        return -1;
+    }
+    n = rnet_proto_encode_state_probe_reply(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id,
+                                            s->cfg.local_slot, s->state_probe_op, s->state_probe_slot,
+                                            match ? 1u : 0u);
+    if (n <= 0)
+    {
+        return -1;
+    }
+    send_raw(s, buf, n);
+    s->state_probe_pending = 0;
+    s->state_probe_match = match ? 1 : 0;
+    if (s->state_probe_size == 0)
+    {
+        s->state_stall_sim = 0;
+        if (s->state_probe_op == RNET_STATE_OP_LOAD)
+        {
+            /* Post-load ready ACK — done; do not keep probe for retransmit. */
+            state_probe_clear(s);
+            return 0;
+        }
+        /* SAVE coord ACK: leave probe active for retransmit replies. */
+        return 0;
+    }
+    if (match)
+    {
+        /* Real hash agree — host finishes probe; guest unstalls. */
+        state_probe_clear(s);
+    }
+    /* Hash miss: keep stall until STATE_BEGIN (or a new probe). */
+    return 0;
+}
+
+void rnet_session_state_probe_finish(RNetSession *s)
+{
+    state_probe_clear(s);
+}
+
 int rnet_session_state_begin(RNetSession *s, rnet_u8 op, rnet_u8 slot, const void *data, size_t size)
 {
     rnet_u8 buf[64];
@@ -1151,6 +1472,9 @@ int rnet_session_state_begin(RNetSession *s, rnet_u8 op, rnet_u8 slot, const voi
         return -1;
     }
 
+    /* Drop any open probe — transfer is the authority path after a hash miss. */
+    state_probe_clear(s);
+
     s->state_buf = (rnet_u8 *)malloc(size);
     if (s->state_buf == NULL)
     {
@@ -1160,7 +1484,7 @@ int rnet_session_state_begin(RNetSession *s, rnet_u8 op, rnet_u8 slot, const voi
     s->state_active = 1;
     s->state_sender = 1;
     s->state_ready = 0;
-    s->state_stall_sim = (op == RNET_STATE_OP_LOAD || op == RNET_STATE_OP_SRAM) ? 1 : 0;
+    s->state_stall_sim = 1;
     s->state_op = op;
     s->state_slot = slot;
     s->state_next_xfer_id++;
@@ -1191,7 +1515,19 @@ int rnet_session_state_begin(RNetSession *s, rnet_u8 op, rnet_u8 slot, const voi
 
 int rnet_session_state_busy(const RNetSession *s)
 {
-    return (s != NULL && s->state_active && !s->state_ready) ? 1 : 0;
+    if (s == NULL)
+    {
+        return 0;
+    }
+    if (s->state_probe_active && s->state_probe_sender && !s->state_probe_reply_ready)
+    {
+        return 1;
+    }
+    if (s->state_probe_active && s->state_probe_pending)
+    {
+        return 1;
+    }
+    return (s->state_active && !s->state_ready) ? 1 : 0;
 }
 
 int rnet_session_state_take_ready(RNetSession *s, rnet_u8 *op_out, rnet_u8 *slot_out, const void **data_out,
@@ -1228,6 +1564,9 @@ void rnet_session_hard_resync(RNetSession *s)
         return;
     }
     rnet_ring_clear(&s->local_ring);
+    /* Clear remotes too: leftover tip rows from a prior post-load epoch are
+     * first-wins and can let one peer admit on stale wire=D inputs. Both peers
+     * re-prime after mutual ready and wait for a fresh tip exchange. */
     for (i = 0; i < RNET_MAX_SLOTS; ++i)
     {
         rnet_ring_clear(&s->remote_rings[i]);
@@ -1240,6 +1579,54 @@ void rnet_session_hard_resync(RNetSession *s)
     s->desync_local_hash = 0;
     s->desync_remote_hash = 0;
     s->highest_remote_ack = 0;
+    /* Peers may have applied a load on different sim ticks; restart together. */
+    s->sim_tick = 0;
+    /* Keep suppress until prime_delay_inputs — avoids emitting an empty tip. */
+    s->input_send_suppress = 1;
+}
+
+void rnet_session_set_input_send_suppress(RNetSession *s, int suppress)
+{
+    if (s == NULL)
+    {
+        return;
+    }
+    s->input_send_suppress = suppress ? 1 : 0;
+}
+
+void rnet_session_prime_delay_inputs(RNetSession *s, const rnet_u8 *bytes, rnet_u16 size)
+{
+    rnet_u32 tip;
+    rnet_u32 t;
+    if (s == NULL || bytes == NULL || size == 0 || size > RNET_INPUT_MAX)
+    {
+        return;
+    }
+    if (s->phase != RNET_PHASE_RUNNING)
+    {
+        return;
+    }
+    tip = rnet_wire_tick_from_sim(s->sim_tick, s->delay);
+    for (t = 0; t <= tip; ++t)
+    {
+        RNetInputSample sample;
+        memset(&sample, 0, sizeof(sample));
+        sample.tick = t;
+        sample.size = size;
+        memcpy(sample.bytes, bytes, size);
+        sample.valid = 1;
+        rnet_ring_store(&s->local_ring, &sample);
+    }
+    s->last_input_ms = 0;
+    s->input_send_suppress = 0;
+    /* Prime must emit even if a LOAD ready probe still has state_stall_sim
+     * (host commits sync before probe_finish). */
+    {
+        int saved_stall = s->state_stall_sim;
+        s->state_stall_sim = 0;
+        send_input_bundle(s);
+        s->state_stall_sim = saved_stall;
+    }
 }
 
 void rnet_session_state_finish(RNetSession *s, int hard_resync)

@@ -42,17 +42,15 @@ void rnet_session_pump(RNetSession *s);
 
 /*
  * Park until a LAN datagram may be readable (or timeout_ms). Prefer this over
- * Sleep/Delay in admit barriers: under dual-process load, 1ms sleeps often
- * stretch to several ms and serialize FMV lockstep. ICE falls back to sleep.
+ * Sleep/Delay in admit barriers. ICE falls back to sleep.
  * Returns 1 if the socket reported readable, 0 on timeout/unavailable.
  */
 int rnet_session_wait_recv(RNetSession *s, int timeout_ms);
 
 /*
- * Returns 1 when gameplay inputs for sim_tick (wire=sim) are present for
- * every remote, publish has been called, and a fresh local sample was stored
- * at wire=sim+D. INPUT_CONFIRM is sent for async desync checks (non-blocking).
- * Returns 0 to stall (keep pumping), including on input desync.
+ * Returns 1 when remotes are ready, resolved inputs hash-agree via
+ * INPUT_CONFIRM, and publish has been called. Local pad is latched once per
+ * wire tick. Returns 0 to stall (keep pumping), including on input desync.
  */
 int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick);
 
@@ -83,14 +81,33 @@ rnet_u32 rnet_session_sim_tick(const RNetSession *s);
 int rnet_session_is_running(const RNetSession *s);
 RNetIceState rnet_session_ice_state(const RNetSession *s);
 
-/* Savestate / SRAM transfer ops for rnet_session_state_begin. */
-#define RNET_STATE_OP_SAVE 0 /* peer stores file; sim keeps running */
+/* Savestate / SRAM transfer ops for rnet_session_state_begin / probe. */
+#define RNET_STATE_OP_SAVE 0 /* peer stores file; admit stalls until probe/xfer done */
 #define RNET_STATE_OP_LOAD 1 /* stalls admit until guest has blob */
 #define RNET_STATE_OP_SRAM 2 /* stalls admit until guest has blob */
 
 /*
- * Host-only (local_slot == 0) blob transfer. LOAD/SRAM stall try_admit until
- * the peer ACKs the full payload; SAVE does not stall (async catch-up).
+ * Hash probe (host→guest): announce (op, slot, size, crc).
+ * - SAVE + size==0: coordinate local save (no admit stall — savestate_poll).
+ * - LOAD + size==0: post-load ready rendezvous (host stalls until guest ACK).
+ * - size!=0: hash announce; stalls until probe_finish or following transfer.
+ */
+int rnet_session_state_probe(RNetSession *s, rnet_u8 op, rnet_u8 slot, rnet_u32 total_size,
+                             rnet_u32 payload_crc);
+/* Host: 1 when guest replied; *match_out = guest already has identical blob. */
+int rnet_session_state_probe_take_reply(RNetSession *s, int *match_out);
+/* Guest: 1 if a host probe is waiting for a local hash/coord answer. */
+int rnet_session_state_probe_pending(const RNetSession *s, rnet_u8 *op_out, rnet_u8 *slot_out,
+                                     rnet_u32 *size_out, rnet_u32 *crc_out);
+/* Guest: answer after hashing local file (or finishing coord save). */
+int rnet_session_state_probe_reply(RNetSession *s, int match);
+/* Clear probe state (host after match-skip, or after starting a transfer). */
+void rnet_session_state_probe_finish(RNetSession *s);
+
+/*
+ * Host-only (local_slot == 0) chunked blob transfer. Stalls try_admit until the
+ * peer ACKs the full payload (all ops). Prefer probe-first; call begin only on
+ * hash miss. payload_crc in BEGIN is verified by the guest before ready.
  */
 int rnet_session_state_begin(RNetSession *s, rnet_u8 op, rnet_u8 slot, const void *data, size_t size);
 int rnet_session_state_busy(const RNetSession *s);
@@ -99,7 +116,16 @@ int rnet_session_state_take_ready(RNetSession *s, rnet_u8 *op_out, rnet_u8 *slot
                                   size_t *size_out);
 /* After apply/store: clear transfer; hard_resync clears input rings on LOAD. */
 void rnet_session_state_finish(RNetSession *s, int hard_resync);
+/* Post-load resync: clear local + remote rings + confirm, sim_tick → 0.
+ * Call once at mutual ready, then prime_delay_inputs on both peers and wait
+ * for try_admit (do not drop the app barrier until admit succeeds). */
 void rnet_session_hard_resync(RNetSession *s);
+/* After hard_resync: seed local delay tip with opaque pad bytes and send so the
+ * peer can admit immediately once the ready rendezvous completes. */
+void rnet_session_prime_delay_inputs(RNetSession *s, const rnet_u8 *bytes, rnet_u16 size);
+/* Suppress INPUT bundle emits (LOAD apply/ready until prime). Admit still runs
+ * while savestate_pending so the restore can execute. */
+void rnet_session_set_input_send_suppress(RNetSession *s, int suppress);
 
 #ifdef __cplusplus
 }

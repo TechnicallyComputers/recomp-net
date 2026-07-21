@@ -19,6 +19,9 @@ extern "C" {
 
 const char *rnet_version_string(void);
 
+/* Same FNV-1a-style hash used for wire payload_crc / STATE probe. */
+rnet_u32 rnet_checksum(const void *data, size_t len);
+
 #ifdef __cplusplus
 }
 #endif

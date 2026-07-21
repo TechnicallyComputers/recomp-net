@@ -19,11 +19,15 @@ extern "C" {
 #define RNET_PKT_STATE_BEGIN 8
 #define RNET_PKT_STATE_CHUNK 9
 #define RNET_PKT_STATE_ACK 10
+#define RNET_PKT_STATE_PROBE 11       /* host→guest: hash/size before transfer */
+#define RNET_PKT_STATE_PROBE_REPLY 12 /* guest→host: match (skip xfer) or not */
 
 #define RNET_MAX_PACKET 1200
 #define RNET_MAX_BUNDLE 8
 #define RNET_STATE_CHUNK_MAX 1024
-#define RNET_STATE_MAX (512u * 1024u)
+/* PSX .pst + dual memcards need multi‑MB; chunked ACK path scales with this. */
+#define RNET_STATE_MAX (8u * 1024u * 1024u)
+#define RNET_STATE_MAX_CHUNKS ((RNET_STATE_MAX + RNET_STATE_CHUNK_MAX - 1u) / RNET_STATE_CHUNK_MAX)
 
 typedef struct RNetWireFrame
 {
@@ -57,6 +61,11 @@ int rnet_proto_encode_state_chunk(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet
                                   rnet_u32 xfer_id, rnet_u32 offset, const rnet_u8 *data, rnet_u16 size);
 int rnet_proto_encode_state_ack(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
                                 rnet_u32 xfer_id, rnet_u32 ack_bytes);
+/* Hash probe: skip transfer when guest already has identical blob. */
+int rnet_proto_encode_state_probe(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
+                                  rnet_u8 op, rnet_u8 slot, rnet_u32 total_size, rnet_u32 payload_crc);
+int rnet_proto_encode_state_probe_reply(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id,
+                                        rnet_u8 local_slot, rnet_u8 op, rnet_u8 slot, rnet_u8 match);
 
 typedef struct RNetDecodedPacket
 {
@@ -83,6 +92,7 @@ typedef struct RNetDecodedPacket
     rnet_u16 state_chunk_size;
     rnet_u32 state_ack_bytes;
     rnet_u8 state_chunk[RNET_STATE_CHUNK_MAX];
+    rnet_u8 state_probe_match; /* PROBE_REPLY only */
 } RNetDecodedPacket;
 
 /* Returns 0 on success. */
