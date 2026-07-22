@@ -129,6 +129,10 @@ if(RNET_BUILD_TESTS)
   target_link_libraries(stun_test PRIVATE recomp_net)
   target_include_directories(stun_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   add_test(NAME stun_test COMMAND stun_test)
+
+  add_executable(session_state_test tests/session_state_test.c)
+  target_link_libraries(session_state_test PRIVATE recomp_net)
+  add_test(NAME session_state_test COMMAND session_state_test)
 endif()
 
 install(TARGETS recomp_net ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)

@@ -50,9 +50,10 @@ void rnet_session_pump(RNetSession *s);
 int rnet_session_wait_recv(RNetSession *s, int timeout_ms);
 
 /*
- * Returns 1 when remotes are ready, resolved inputs hash-agree via
- * INPUT_CONFIRM, and publish has been called. Local pad is latched once per
- * wire tick. Returns 0 to stall (keep pumping), including on input desync.
+ * Returns 1 when gameplay inputs for sim_tick (wire=sim) are present for
+ * every remote, their pipelined INPUT_CONFIRM hashes agree, and publish has
+ * been called. A fresh local sample and confirmation are prepared at
+ * wire=sim+D. Returns 0 to stall, including on input desync.
  */
 int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick);
 
