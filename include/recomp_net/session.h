@@ -51,9 +51,9 @@ int rnet_session_wait_recv(RNetSession *s, int timeout_ms);
 
 /*
  * Returns 1 when gameplay inputs for sim_tick (wire=sim) are present for
- * every remote and publish has been called. A fresh local sample is stored at
- * wire=sim+D; INPUT_CONFIRM is asynchronous and flags later disagreement.
- * Returns 0 to stall (keep pumping), including on input desync.
+ * every remote, their pipelined INPUT_CONFIRM hashes agree, and publish has
+ * been called. A fresh local sample and confirmation are prepared at
+ * wire=sim+D. Returns 0 to stall, including on input desync.
  */
 int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick);
 
