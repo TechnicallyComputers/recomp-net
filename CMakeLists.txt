@@ -12,6 +12,7 @@ option(RNET_BUILD_TESTS "Build unit tests" ON)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 set(RNET_CORE_SOURCES
+  src/platform/rnet_address.c
   src/platform/rnet_platform.c
   src/protocol/rnet_protocol.c
   src/input/rnet_rings.c
@@ -39,7 +40,7 @@ if(UNIX)
 endif()
 
 if(WIN32)
-  target_link_libraries(recomp_net PUBLIC ws2_32)
+  target_link_libraries(recomp_net PUBLIC ws2_32 iphlpapi)
 endif()
 
 if(RNET_ENABLE_ICE)
@@ -117,6 +118,11 @@ if(RNET_BUILD_TESTS)
   add_executable(lan_lobby_test tests/lan_lobby_test.c)
   target_link_libraries(lan_lobby_test PRIVATE recomp_net)
   add_test(NAME lan_lobby_test COMMAND lan_lobby_test)
+
+  add_executable(address_test tests/address_test.c)
+  target_link_libraries(address_test PRIVATE recomp_net)
+  target_include_directories(address_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  add_test(NAME address_test COMMAND address_test)
 endif()
 
 install(TARGETS recomp_net ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)

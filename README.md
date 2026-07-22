@@ -13,6 +13,7 @@ vendor SSB64 code and does not implement rollback, automatch, or game UI.
 - Opaque per-slot input blobs (`RNetInputSample`)
 - Fixed input delay `D` with `try_admit` / `advance` host loop
 - UDP LAN transport and optional ICE mux
+- Portable, ranked local IPv4 interface discovery for LAN launchers
 - Host-owned signaling callbacks (ICE); lobby / matchmaking is **not** in this
   repo — see [`docs/lobby.md`](docs/lobby.md) and open-source
   [`recomp-net-server`](https://github.com/TechnicallyComputers/recomp-net-server)
@@ -93,6 +94,7 @@ See [docs/host_integration.md](docs/host_integration.md).
 | [docs/protocol.md](docs/protocol.md) | Wire packets |
 | [docs/signaling.md](docs/signaling.md) | ICE signaling contract |
 | [docs/host_integration.md](docs/host_integration.md) | Hooking a recomp host |
+| [docs/address_discovery.md](docs/address_discovery.md) | Selecting a LAN address to advertise |
 
 ## Non-goals (v1)
 

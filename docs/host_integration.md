@@ -60,3 +60,10 @@ and leave the session instead of spinning forever.
 `RNetConfig` fields (`slot_count`, `local_slot`, `input_delay`,
 `bundle_redundancy`, `session_id`, `protocol_magic`) must match across peers
 except `local_slot`. Negotiate them out-of-band (lobby) before `create`.
+
+## LAN address selection
+
+Bind listeners to `0.0.0.0:port` and advertise a concrete address selected from
+`rnet_ipv4_enumerate`. The returned interface labels let launchers distinguish
+physical, VPN, and virtual adapters instead of silently choosing the wrong LAN.
+See [address_discovery.md](address_discovery.md) for ordering and API details.
