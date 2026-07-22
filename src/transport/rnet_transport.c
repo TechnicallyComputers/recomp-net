@@ -28,6 +28,14 @@ void rnet_transport_shutdown(RNetTransport *t)
     t->ice_recv = NULL;
     t->ice_ctx = NULL;
     t->peer_known = 0;
+    t->pending_peer_known = 0;
+    t->accept_first_peer = 0;
+}
+
+static int sockaddr_equal(const struct sockaddr_in *a, const struct sockaddr_in *b)
+{
+    return a->sin_family == b->sin_family && a->sin_port == b->sin_port &&
+           a->sin_addr.s_addr == b->sin_addr.s_addr;
 }
 
 int rnet_transport_start_lan(RNetTransport *t, const char *bind_hostport, const char *peer_hostport)
@@ -36,7 +44,7 @@ int rnet_transport_start_lan(RNetTransport *t, const char *bind_hostport, const 
     rnet_u16 port = 0;
     struct sockaddr_in bind_addr;
 
-    if ((t == NULL) || (bind_hostport == NULL) || (peer_hostport == NULL))
+    if ((t == NULL) || (bind_hostport == NULL))
     {
         return -1;
     }
@@ -70,17 +78,25 @@ int rnet_transport_start_lan(RNetTransport *t, const char *bind_hostport, const 
         return -1;
     }
 
-    if (rnet_os_parse_hostport(peer_hostport, host, sizeof(host), &port) != 0)
+    if (peer_hostport != NULL && peer_hostport[0] != '\0')
     {
-        rnet_os_socket_destroy(&t->sock);
-        return -1;
+        if (rnet_os_parse_hostport(peer_hostport, host, sizeof(host), &port) != 0 || port == 0)
+        {
+            rnet_os_socket_destroy(&t->sock);
+            return -1;
+        }
+        if (rnet_os_resolve_sockaddr(host, port, &t->peer) != 0)
+        {
+            rnet_os_socket_destroy(&t->sock);
+            return -1;
+        }
+        t->peer_known = 1;
     }
-    if (rnet_os_resolve_sockaddr(host, port, &t->peer) != 0)
+    else
     {
-        rnet_os_socket_destroy(&t->sock);
-        return -1;
+        t->peer_known = 0;
+        t->accept_first_peer = 1;
     }
-    t->peer_known = 1;
     t->mode = RNET_TRANSPORT_LAN_UDP;
     return 0;
 }
@@ -126,14 +142,23 @@ int rnet_transport_recv(RNetTransport *t, rnet_u8 *buf, size_t cap)
         {
             return -1;
         }
-        n = rnet_os_recvfrom(t->sock, buf, cap, &src, &would_block);
-        if (n < 0)
+        for (;;)
         {
-            return would_block ? 0 : -1;
+            n = rnet_os_recvfrom(t->sock, buf, cap, &src, &would_block);
+            if (n < 0)
+            {
+                return would_block ? 0 : -1;
+            }
+            if (!t->peer_known || sockaddr_equal(&src, &t->peer))
+            {
+                if (t->accept_first_peer && !t->peer_known)
+                {
+                    t->pending_peer = src;
+                    t->pending_peer_known = 1;
+                }
+                return n;
+            }
         }
-        /* Learn peer address from first packet if desired (keep configured peer). */
-        (void)src;
-        return n;
     }
     if (t->mode == RNET_TRANSPORT_ICE)
     {
@@ -149,4 +174,15 @@ int rnet_transport_recv(RNetTransport *t, rnet_u8 *buf, size_t cap)
         return (int)out_len;
     }
     return 0;
+}
+
+void rnet_transport_accept_pending_peer(RNetTransport *t)
+{
+    if (t == NULL || !t->accept_first_peer || t->peer_known || !t->pending_peer_known)
+    {
+        return;
+    }
+    t->peer = t->pending_peer;
+    t->peer_known = 1;
+    t->pending_peer_known = 0;
 }

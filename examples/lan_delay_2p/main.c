@@ -2,10 +2,10 @@
  * Two-process LAN delay-sync demo.
  *
  * Terminal A (slot 0 / sim authority):
- *   ./lan_delay_2p 0 7777 127.0.0.1:7778
+ *   ./lan_delay_2p 0 7777
  *
  * Terminal B (slot 1):
- *   ./lan_delay_2p 1 7778 127.0.0.1:7777
+ *   ./lan_delay_2p 1 0 127.0.0.1:7777
  *
  * Optional env: RNET_DELAY (default 2), RNET_SESSION_ID (default 1), RNET_TICKS (default 120)
  */
@@ -91,9 +91,9 @@ int main(int argc, char **argv)
     unsigned wait_iters = 0;
     rnet_u16 bind_port;
 
-    if (argc < 4)
+    if (argc < 3)
     {
-        fprintf(stderr, "usage: %s <local_slot> <bind_port> <peer_host:port>\n", argv[0]);
+        fprintf(stderr, "usage: %s <local_slot> <bind_port> [peer_host:port]\n", argv[0]);
         return 1;
     }
 
@@ -103,7 +103,7 @@ int main(int argc, char **argv)
     cfg.input_delay = (rnet_u8)env_u("RNET_DELAY", 2);
     cfg.session_id = env_u("RNET_SESSION_ID", 1);
     bind_port = (rnet_u16)strtoul(argv[2], NULL, 10);
-    peer = argv[3];
+    peer = argc >= 4 ? argv[3] : "";
     snprintf(bind_spec, sizeof(bind_spec), "0.0.0.0:%u", (unsigned)bind_port);
     target_ticks = env_u("RNET_TICKS", 120);
 
@@ -115,7 +115,8 @@ int main(int argc, char **argv)
     host.ctx = &ctx;
 
     printf("recomp-net %s  slot=%u delay=%u bind=%s peer=%s\n", rnet_version_string(),
-           (unsigned)cfg.local_slot, (unsigned)cfg.input_delay, bind_spec, peer);
+           (unsigned)cfg.local_slot, (unsigned)cfg.input_delay, bind_spec,
+           peer[0] ? peer : "(accept first)");
 
     session = rnet_session_create(&cfg, &host);
     if (session == NULL)

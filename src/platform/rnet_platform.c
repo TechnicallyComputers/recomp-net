@@ -354,6 +354,7 @@ int rnet_os_last_error(void)
 int rnet_os_parse_hostport(const char *spec, char *host_out, size_t host_cap, rnet_u16 *port_out)
 {
     const char *colon;
+    char *port_end;
     size_t host_len;
     unsigned long port;
 
@@ -383,8 +384,12 @@ int rnet_os_parse_hostport(const char *spec, char *host_out, size_t host_cap, rn
             host_out[host_len] = '\0';
         }
     }
-    port = strtoul(colon + 1, NULL, 10);
-    if (port == 0UL || port > 65535UL)
+    if (colon[1] == '\0')
+    {
+        return -1;
+    }
+    port = strtoul(colon + 1, &port_end, 10);
+    if (*port_end != '\0' || port > 65535UL)
     {
         return -1;
     }
