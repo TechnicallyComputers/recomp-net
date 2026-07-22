@@ -33,3 +33,37 @@ retry if a complete list is required and the second result exceeds capacity.
 This API discovers local interface addresses only. A public NAT address and its
 UDP port mapping require STUN/ICE, explicit port forwarding, or a trusted lobby
 service that reports the observed endpoint.
+
+## External IPv4 through STUN
+
+`rnet_external_ipv4_discover` sends a synchronous RFC 5389 Binding request and
+returns the server-reflexive IPv4 address from `XOR-MAPPED-ADDRESS` (preferred)
+or legacy `MAPPED-ADDRESS`. The response source, magic cookie, message framing,
+attribute bounds, address family, and 96-bit transaction ID are validated.
+
+```c
+RNetExternalIpv4Config stun;
+char external_ip[RNET_IPV4_ADDRESS_TEXT_MAX];
+rnet_external_ipv4_config_init(&stun);
+stun.timeout_ms = 750;
+if (rnet_external_ipv4_discover(&stun, external_ip,
+                                sizeof(external_ip)) ==
+    RNET_EXTERNAL_IPV4_OK) {
+    /* Display external_ip; advertise only after port-forwarding is ready. */
+}
+```
+
+Passing `NULL` for the configuration uses `stun.l.google.com:19302` with a
+750 ms UDP deadline. Hosts can replace the hostname, port, and timeout, and
+should do so when they operate their own STUN infrastructure. Positive timeout
+values are clamped to 1000 ms because the API is synchronous and may be called
+from a launcher render thread. UDP requests are retransmitted with the same
+cryptographically generated transaction ID until the deadline. Hostname lookup
+happens before that deadline and remains bounded by the platform DNS resolver;
+cache the result and avoid calling discovery every frame.
+
+STUN reports the observed IP address, not whether the chosen game port is
+forwarded and reachable. ICE or explicit router configuration is still needed
+for general Internet traversal. Never bind a local socket to the discovered
+public/NAT address: bind `0.0.0.0:port` and advertise `external_ip:port` as two
+separate endpoint values.

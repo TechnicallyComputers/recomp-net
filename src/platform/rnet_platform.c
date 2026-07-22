@@ -17,6 +17,7 @@
 
 #ifdef _WIN32
 
+#include <bcrypt.h>
 #include <windows.h>
 
 static int s_wsa_started;
@@ -194,6 +195,28 @@ int rnet_os_last_error(void)
     return (int)WSAGetLastError();
 }
 
+int rnet_os_random_bytes(void *out, size_t len)
+{
+    unsigned char *bytes = (unsigned char *)out;
+
+    if (len != 0U && out == NULL)
+    {
+        return -1;
+    }
+    while (len != 0U)
+    {
+        ULONG chunk = len > (size_t)ULONG_MAX ? ULONG_MAX : (ULONG)len;
+        if (BCryptGenRandom(NULL, bytes, chunk,
+                            BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+        {
+            return -1;
+        }
+        bytes += chunk;
+        len -= chunk;
+    }
+    return 0;
+}
+
 #else /* !_WIN32 */
 
 #include <arpa/inet.h>
@@ -347,6 +370,39 @@ int rnet_os_poll_recv(rnet_socket s, int timeout_ms)
 int rnet_os_last_error(void)
 {
     return errno;
+}
+
+int rnet_os_random_bytes(void *out, size_t len)
+{
+    unsigned char *bytes = (unsigned char *)out;
+    int fd;
+
+    if (len != 0U && out == NULL)
+    {
+        return -1;
+    }
+    fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0)
+    {
+        return -1;
+    }
+    while (len != 0U)
+    {
+        ssize_t count = read(fd, bytes, len);
+        if (count < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        if (count <= 0)
+        {
+            close(fd);
+            return -1;
+        }
+        bytes += (size_t)count;
+        len -= (size_t)count;
+    }
+    close(fd);
+    return 0;
 }
 
 #endif /* _WIN32 */

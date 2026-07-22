@@ -14,6 +14,7 @@ vendor SSB64 code and does not implement rollback, automatch, or game UI.
 - Fixed input delay `D` with `try_admit` / `advance` host loop
 - UDP LAN transport and optional ICE mux
 - Portable, ranked local IPv4 interface discovery for LAN launchers
+- Synchronous RFC 5389 external IPv4 discovery through configurable STUN
 - Host-owned signaling callbacks (ICE); lobby / matchmaking is **not** in this
   repo — see [`docs/lobby.md`](docs/lobby.md) and open-source
   [`recomp-net-server`](https://github.com/TechnicallyComputers/recomp-net-server)

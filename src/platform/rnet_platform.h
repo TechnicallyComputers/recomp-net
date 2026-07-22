@@ -42,6 +42,7 @@ void rnet_os_sleep_micros(unsigned usec);
 /* Block until sock is readable or timeout_ms elapses. 1=readable, 0=timeout, -1=error/invalid. */
 int rnet_os_poll_recv(rnet_socket s, int timeout_ms);
 int rnet_os_last_error(void);
+int rnet_os_random_bytes(void *out, size_t len);
 
 /* Parse "host:port" or ":port". host_out may be NULL. Returns 0 on success. */
 int rnet_os_parse_hostport(const char *spec, char *host_out, size_t host_cap, rnet_u16 *port_out);
