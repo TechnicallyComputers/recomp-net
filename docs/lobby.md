@@ -1,21 +1,21 @@
 # Lobby protocol (client-facing)
 
 `recomp-net` is a delay-sync library only — it does **not** include a lobby
-server. The proprietary control plane lives in the sibling private repo
-**`recomp-net-server`**.
+server. The open-source control plane lives in the sibling repo
+[`recomp-net-server`](https://github.com/TechnicallyComputers/recomp-net-server).
 
 Authoritative wire documentation for the MotK / psxrecomp WebSocket JSON
 protocol:
 
-- `recomp-net-server/docs/WS_LOBBY.md`
-- Architecture: `recomp-net-server/docs/HOW_IT_WORKS.md`
+- https://github.com/TechnicallyComputers/recomp-net-server/blob/main/docs/WS_LOBBY.md
+- Architecture: https://github.com/TechnicallyComputers/recomp-net-server/blob/main/docs/HOW_IT_WORKS.md
 
 Default client URL: `ws://netplay.technicallycomputers.ca:8765`  
 Override with env `PSX_NET_LOBBY_URL` (PSX) or `SNES_NET_LOBBY_URL` (SNES).
-Local bring-up: `ws://127.0.0.1:8765`.
+Local bring-up: `ws://127.0.0.1:8765` (run `recomp-net-server` yourself).
 
 Host `match_caps` (opaque JSON on create/start) are echoed to guests so
-sim-affecting settings stay aligned; see `recomp-net-server/docs/WS_LOBBY.md`.
+sim-affecting settings stay aligned; see the server `WS_LOBBY.md`.
 
 Lobbies also carry `game_name` + `game_version` (release pin). Create/join
 must match; `list` can filter by either. Empty version normalizes to `dev`.
