@@ -12,9 +12,12 @@ option(RNET_BUILD_TESTS "Build unit tests" ON)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 set(RNET_CORE_SOURCES
+  src/platform/rnet_address.c
   src/platform/rnet_platform.c
+  src/platform/rnet_stun.c
   src/protocol/rnet_protocol.c
   src/input/rnet_rings.c
+  src/lobby/rnet_lan_lobby.c
   src/transport/rnet_transport.c
   src/session/rnet_session.c
   src/ice/rnet_ice_state.c
@@ -38,7 +41,7 @@ if(UNIX)
 endif()
 
 if(WIN32)
-  target_link_libraries(recomp_net PUBLIC ws2_32)
+  target_link_libraries(recomp_net PUBLIC ws2_32 iphlpapi bcrypt)
 endif()
 
 if(RNET_ENABLE_ICE)
@@ -112,6 +115,20 @@ if(RNET_BUILD_TESTS)
   target_link_libraries(hostport_test PRIVATE recomp_net)
   target_include_directories(hostport_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   add_test(NAME hostport_test COMMAND hostport_test)
+
+  add_executable(lan_lobby_test tests/lan_lobby_test.c)
+  target_link_libraries(lan_lobby_test PRIVATE recomp_net)
+  add_test(NAME lan_lobby_test COMMAND lan_lobby_test)
+
+  add_executable(address_test tests/address_test.c)
+  target_link_libraries(address_test PRIVATE recomp_net)
+  target_include_directories(address_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  add_test(NAME address_test COMMAND address_test)
+
+  add_executable(stun_test tests/stun_test.c)
+  target_link_libraries(stun_test PRIVATE recomp_net)
+  target_include_directories(stun_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  add_test(NAME stun_test COMMAND stun_test)
 endif()
 
 install(TARGETS recomp_net ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)

@@ -32,3 +32,16 @@ must match; `list` can filter by either. Empty version normalizes to `dev`.
 
 Open-source clients (e.g. psxrecomp `psx_lobby_client` + vendored
 `runtime/src/lobby_ws/`) implement the protocol; they do not embed the server.
+
+## Local LAN room registry
+
+`recomp_net/lan_lobby.h` provides the small, server-independent room registry
+used by launchers running multiple instances on one machine. A host publishes
+an `RNetLanLobby` beside its configuration, and launchers merge that row with
+the remote WebSocket list. Joining claims the guest slot but does not start the
+game; both launchers continue showing their shared room until the host calls
+`rnet_lan_lobby_set_started()`.
+
+The registry complements the lobby server. Hosts should still publish the same
+LAN endpoint remotely so other machines can discover it. It does not carry
+input or replace `rnet_session_start_lan()`.

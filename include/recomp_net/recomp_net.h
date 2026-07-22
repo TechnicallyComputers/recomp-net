@@ -1,9 +1,11 @@
 #ifndef RECOMP_NET_H
 #define RECOMP_NET_H
 
+#include "recomp_net/address.h"
 #include "recomp_net/config.h"
 #include "recomp_net/ice.h"
 #include "recomp_net/input.h"
+#include "recomp_net/lan_lobby.h"
 #include "recomp_net/session.h"
 #include "recomp_net/transport.h"
 #include "recomp_net/types.h"
