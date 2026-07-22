@@ -45,6 +45,8 @@ struct RNetSession
     rnet_u64 last_hello_ms;
     rnet_u64 last_ready_ms;
     rnet_u64 last_input_ms;
+    rnet_u32 last_input_tip;
+    int last_input_tip_valid;
     int is_sim_authority; /* local_slot == 0 sends START */
     /* Resolved hashes and peer confirmations are prepared up
      * to D ticks ahead, so strict agreement normally completes before admit. */
@@ -834,11 +836,14 @@ static void send_input_bundle(RNetSession *s)
     {
         return;
     }
-    if (now - s->last_input_ms < 2ULL)
-    {
-        /* Soft rate limit; still allow every pump after a few ms. */
-    }
     tip = rnet_wire_tick_from_sim(s->sim_tick, s->delay);
+    /* A new future tip is latency-sensitive and sends immediately. Repeated
+     * pumps for the same tip are reliability retransmits, not new data. */
+    if (s->last_input_tip_valid && s->last_input_tip == tip &&
+        now - s->last_input_ms < 8ULL)
+    {
+        return;
+    }
     if (red < 1)
     {
         red = 1;
@@ -878,6 +883,8 @@ static void send_input_bundle(RNetSession *s)
                                   frames, count);
     send_raw(s, buf, len);
     s->last_input_ms = now;
+    s->last_input_tip = tip;
+    s->last_input_tip_valid = 1;
 }
 
 static int remotes_ready_for_play_wire(RNetSession *s, rnet_u32 play_wire)
@@ -1722,6 +1729,7 @@ void rnet_session_hard_resync(RNetSession *s)
     s->desync_local_hash = 0;
     s->desync_remote_hash = 0;
     s->highest_remote_ack = 0;
+    s->last_input_tip_valid = 0;
     /* Peers may have applied a load on different sim ticks; restart together. */
     s->sim_tick = 0;
     /* Keep suppress until prime_delay_inputs — avoids emitting an empty tip. */
@@ -1761,6 +1769,7 @@ void rnet_session_prime_delay_inputs(RNetSession *s, const rnet_u8 *bytes, rnet_
         rnet_ring_store(&s->local_ring, &sample);
     }
     s->last_input_ms = 0;
+    s->last_input_tip_valid = 0;
     s->input_send_suppress = 0;
     /* Prime must emit even if a LOAD ready probe still has state_stall_sim
      * (host commits sync before probe_finish). */
