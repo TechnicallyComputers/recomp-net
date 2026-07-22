@@ -3,10 +3,25 @@
 #if defined(RNET_ENABLE_ICE)
 
 #include <juice/juice.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if defined(_WIN32)
+#include <windows.h>
+typedef CRITICAL_SECTION RNetIceMutex;
+static void ice_mutex_init(RNetIceMutex *mutex) { InitializeCriticalSection(mutex); }
+static void ice_mutex_destroy(RNetIceMutex *mutex) { DeleteCriticalSection(mutex); }
+static void ice_mutex_lock(RNetIceMutex *mutex) { EnterCriticalSection(mutex); }
+static void ice_mutex_unlock(RNetIceMutex *mutex) { LeaveCriticalSection(mutex); }
+#else
+#include <pthread.h>
+typedef pthread_mutex_t RNetIceMutex;
+static void ice_mutex_init(RNetIceMutex *mutex) { (void)pthread_mutex_init(mutex, NULL); }
+static void ice_mutex_destroy(RNetIceMutex *mutex) { (void)pthread_mutex_destroy(mutex); }
+static void ice_mutex_lock(RNetIceMutex *mutex) { (void)pthread_mutex_lock(mutex); }
+static void ice_mutex_unlock(RNetIceMutex *mutex) { (void)pthread_mutex_unlock(mutex); }
+#endif
 
 #define RNET_ICE_RECV_QUEUE 64
 #define RNET_ICE_RECV_MAX 2048
@@ -27,7 +42,7 @@ typedef struct RNetIceCandSlot
 struct RNetIceAgent
 {
     juice_agent_t *agent;
-    pthread_mutex_t mutex;
+    RNetIceMutex mutex;
     RNetIceState state;
     RNetIceSignalEmitFn emit;
     void *user;
@@ -105,36 +120,36 @@ static void on_state_changed(juice_agent_t *agent, juice_state_t state, void *us
 {
     RNetIceAgent *a = (RNetIceAgent *)user_ptr;
     (void)agent;
-    pthread_mutex_lock(&a->mutex);
+    ice_mutex_lock(&a->mutex);
     a->state = map_juice_state(state);
-    pthread_mutex_unlock(&a->mutex);
+    ice_mutex_unlock(&a->mutex);
 }
 
 static void on_candidate(juice_agent_t *agent, const char *sdp, void *user_ptr)
 {
     RNetIceAgent *a = (RNetIceAgent *)user_ptr;
     (void)agent;
-    pthread_mutex_lock(&a->mutex);
+    ice_mutex_lock(&a->mutex);
     queue_cand(a, sdp);
-    pthread_mutex_unlock(&a->mutex);
+    ice_mutex_unlock(&a->mutex);
 }
 
 static void on_gathering_done(juice_agent_t *agent, void *user_ptr)
 {
     RNetIceAgent *a = (RNetIceAgent *)user_ptr;
     (void)agent;
-    pthread_mutex_lock(&a->mutex);
+    ice_mutex_lock(&a->mutex);
     a->gathering_done_posted = 1;
-    pthread_mutex_unlock(&a->mutex);
+    ice_mutex_unlock(&a->mutex);
 }
 
 static void on_recv(juice_agent_t *agent, const char *data, size_t size, void *user_ptr)
 {
     RNetIceAgent *a = (RNetIceAgent *)user_ptr;
     (void)agent;
-    pthread_mutex_lock(&a->mutex);
+    ice_mutex_lock(&a->mutex);
     queue_recv(a, data, size);
-    pthread_mutex_unlock(&a->mutex);
+    ice_mutex_unlock(&a->mutex);
 }
 
 static void emit_signal(RNetIceAgent *a, RNetSignalType type, const char *text, rnet_u8 flag)
@@ -167,7 +182,7 @@ RNetIceAgent *rnet_ice_agent_create(const RNetIceConfig *cfg, RNetIceSignalEmitF
     {
         return NULL;
     }
-    pthread_mutex_init(&a->mutex, NULL);
+    ice_mutex_init(&a->mutex);
     a->emit = emit;
     a->user = user;
     a->state = RNET_ICE_STATE_IDLE;
@@ -208,7 +223,7 @@ RNetIceAgent *rnet_ice_agent_create(const RNetIceConfig *cfg, RNetIceSignalEmitF
     a->agent = juice_create(&jcfg);
     if (a->agent == NULL)
     {
-        pthread_mutex_destroy(&a->mutex);
+        ice_mutex_destroy(&a->mutex);
         free(a);
         return NULL;
     }
@@ -229,7 +244,7 @@ void rnet_ice_agent_destroy(RNetIceAgent *agent)
         juice_destroy(agent->agent);
         agent->agent = NULL;
     }
-    pthread_mutex_destroy(&agent->mutex);
+    ice_mutex_destroy(&agent->mutex);
     free(agent);
 }
 
@@ -280,7 +295,7 @@ void rnet_ice_agent_poll(RNetIceAgent *agent)
         return;
     }
 
-    pthread_mutex_lock(&agent->mutex);
+    ice_mutex_lock(&agent->mutex);
     while (agent->cand_count > 0 && count < RNET_ICE_CAND_QUEUE)
     {
         drain[count++] = agent->cand_q[agent->cand_head];
@@ -292,7 +307,7 @@ void rnet_ice_agent_poll(RNetIceAgent *agent)
         gathering_done = 1;
         agent->gathering_done_posted = 0;
     }
-    pthread_mutex_unlock(&agent->mutex);
+    ice_mutex_unlock(&agent->mutex);
 
     for (i = 0; i < count; ++i)
     {
@@ -364,10 +379,6 @@ int rnet_ice_agent_send(RNetIceAgent *agent, const rnet_u8 *buf, size_t len)
         return -1;
     }
     rc = juice_send(agent->agent, (const char *)buf, len);
-    if (rc == JUICE_ERR_AGAIN)
-    {
-        return 0;
-    }
     if (rc < 0)
     {
         return -1;
@@ -382,10 +393,10 @@ int rnet_ice_agent_recv(RNetIceAgent *agent, rnet_u8 *buf, size_t cap, size_t *o
         return -1;
     }
     *out_len = 0;
-    pthread_mutex_lock(&agent->mutex);
+    ice_mutex_lock(&agent->mutex);
     if (agent->recv_count == 0)
     {
-        pthread_mutex_unlock(&agent->mutex);
+        ice_mutex_unlock(&agent->mutex);
         return -1; /* empty */
     }
     {
@@ -400,7 +411,7 @@ int rnet_ice_agent_recv(RNetIceAgent *agent, rnet_u8 *buf, size_t cap, size_t *o
         agent->recv_head = (agent->recv_head + 1U) % RNET_ICE_RECV_QUEUE;
         agent->recv_count--;
     }
-    pthread_mutex_unlock(&agent->mutex);
+    ice_mutex_unlock(&agent->mutex);
     return 0;
 }
 
