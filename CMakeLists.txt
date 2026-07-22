@@ -15,6 +15,7 @@ set(RNET_CORE_SOURCES
   src/platform/rnet_platform.c
   src/protocol/rnet_protocol.c
   src/input/rnet_rings.c
+  src/lobby/rnet_lan_lobby.c
   src/transport/rnet_transport.c
   src/session/rnet_session.c
   src/ice/rnet_ice_state.c
@@ -112,6 +113,10 @@ if(RNET_BUILD_TESTS)
   target_link_libraries(hostport_test PRIVATE recomp_net)
   target_include_directories(hostport_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   add_test(NAME hostport_test COMMAND hostport_test)
+
+  add_executable(lan_lobby_test tests/lan_lobby_test.c)
+  target_link_libraries(lan_lobby_test PRIVATE recomp_net)
+  add_test(NAME lan_lobby_test COMMAND lan_lobby_test)
 endif()
 
 install(TARGETS recomp_net ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)
