@@ -375,8 +375,10 @@ static void pump_recv(RNetSession *s)
         {
             break;
         }
-        if (rnet_proto_decode(buf, (size_t)n, s->cfg.protocol_magic, &pkt) == 0)
+        if (rnet_proto_decode(buf, (size_t)n, s->cfg.protocol_magic, &pkt) == 0 &&
+            pkt.session_id == s->cfg.session_id)
         {
+            rnet_transport_accept_pending_peer(&s->transport);
             s->last_peer_rx_ms = session_now(s);
             handle_decoded(s, &pkt);
         }

@@ -28,7 +28,9 @@ typedef struct RNetHostVTable
 RNetSession *rnet_session_create(const RNetConfig *cfg, const RNetHostVTable *host);
 void rnet_session_destroy(RNetSession *s);
 
-/* Start raw UDP peer session. bind/peer are "host:port" or ":port" / "ip:port". */
+/* Start raw UDP peer session. bind/peer are "host:port" or ":port" / "ip:port".
+ * peer may be NULL/empty for host-style LAN: the first valid session packet
+ * selects the peer endpoint. */
 int rnet_session_start_lan(RNetSession *s, const char *bind_hostport, const char *peer_hostport);
 
 /*

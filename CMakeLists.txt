@@ -107,6 +107,11 @@ if(RNET_BUILD_TESTS)
   add_executable(wire_map_test tests/wire_map_test.c)
   target_link_libraries(wire_map_test PRIVATE recomp_net)
   add_test(NAME wire_map_test COMMAND wire_map_test)
+
+  add_executable(hostport_test tests/hostport_test.c)
+  target_link_libraries(hostport_test PRIVATE recomp_net)
+  target_include_directories(hostport_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  add_test(NAME hostport_test COMMAND hostport_test)
 endif()
 
 install(TARGETS recomp_net ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)

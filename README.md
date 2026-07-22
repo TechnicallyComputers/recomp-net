@@ -52,10 +52,10 @@ ICE needs juice at link time — without a local copy or FetchContent access,
 
 ```bash
 # terminal A (slot 0 / sim authority)
-./build/lan_delay_2p 0 7777 127.0.0.1:7778
+./build/lan_delay_2p 0 7777
 
 # terminal B (slot 1)
-./build/lan_delay_2p 1 7778 127.0.0.1:7777
+./build/lan_delay_2p 1 0 127.0.0.1:7777
 ```
 
 ## Integrate
@@ -70,7 +70,8 @@ target_link_libraries(your_host PRIVATE recomp_net)
 
 /* Implement RNetHostVTable: sample_local, publish, optional on_signal/now_ms */
 RNetSession *s = rnet_session_create(&cfg, &host);
-rnet_session_start_lan(s, "0.0.0.0:7777", "127.0.0.1:7778");
+/* Host-style listen: pass NULL/empty peer and learn the first inbound client. */
+rnet_session_start_lan(s, "0.0.0.0:7777", NULL);
 for (;;) {
     rnet_session_pump(s);
     if (rnet_session_try_admit(s, rnet_session_sim_tick(s))) {
