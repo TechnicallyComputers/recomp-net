@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define RNET_MAX_SLOTS 4
+#define RNET_MAX_SLOTS 5
 #define RNET_INPUT_MAX 32
 #define RNET_HISTORY_LENGTH 128
 #define RNET_DEFAULT_BUNDLE_REDUNDANCY 3

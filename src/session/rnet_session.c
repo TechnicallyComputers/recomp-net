@@ -1055,6 +1055,11 @@ int rnet_session_start_lan(RNetSession *s, const char *bind_hostport, const char
     {
         return -1;
     }
+    /* Host-relay fanout for 3–5P: guests stay single-peer to host; host rebroadcasts. */
+    if (s->cfg.local_slot == 0 && s->cfg.slot_count > 2)
+    {
+        rnet_transport_set_relay_hub(&s->transport, 1);
+    }
     s->phase = RNET_PHASE_LINKING;
     s->last_hello_ms = 0;
     return 0;
