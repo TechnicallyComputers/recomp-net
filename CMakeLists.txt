@@ -3,7 +3,8 @@ project(recomp_net VERSION 0.1.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_C_EXTENSIONS OFF)
+# Do not set CMAKE_C_EXTENSIONS OFF here: FetchContent deps (libjuice) inherit
+# directory-scope settings and need -std=gnu11 for glibc POSIX APIs.
 
 option(RNET_ENABLE_ICE "Build libjuice ICE transport" OFF)
 option(RNET_BUILD_EXAMPLES "Build example programs" ON)
@@ -26,6 +27,9 @@ set(RNET_CORE_SOURCES
 
 add_library(recomp_net STATIC ${RNET_CORE_SOURCES})
 add_library(recomp_net::recomp_net ALIAS recomp_net)
+
+# Strict ISO C11 only for this target — not directory-wide (breaks libjuice).
+set_target_properties(recomp_net PROPERTIES C_EXTENSIONS OFF)
 
 target_include_directories(recomp_net
   PUBLIC
