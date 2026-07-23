@@ -70,10 +70,17 @@ if(RNET_ENABLE_ICE)
     FetchContent_Declare(
       libjuice
       GIT_REPOSITORY https://github.com/paullouisageneau/libjuice.git
-      GIT_TAG        v1.5.9
+      GIT_TAG        v1.7.2
       GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(libjuice)
+    # Parent -std=c11 / strict ISO hides getaddrinfo without a feature macro.
+    if(TARGET juice-static)
+      target_compile_definitions(juice-static PRIVATE _GNU_SOURCE)
+    endif()
+    if(TARGET juice)
+      target_compile_definitions(juice PRIVATE _GNU_SOURCE)
+    endif()
     if(NOT TARGET Libjuice::Libjuice)
       if(TARGET juice-static)
         add_library(Libjuice::Libjuice ALIAS juice-static)
