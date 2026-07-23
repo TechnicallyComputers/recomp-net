@@ -1,10 +1,16 @@
 /* Feature macros before any system headers (strict C11 / -std=c11). */
 #if !defined(_WIN32)
+#if defined(__APPLE__)
+#if !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
+#else
 #if !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
 #endif
 #if !defined(_DEFAULT_SOURCE)
 #define _DEFAULT_SOURCE 1
+#endif
 #endif
 #endif
 

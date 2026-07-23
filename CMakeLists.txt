@@ -36,8 +36,12 @@ target_include_directories(recomp_net
 )
 
 target_compile_definitions(recomp_net PRIVATE $<$<PLATFORM_ID:Windows>:_CRT_SECURE_NO_WARNINGS>)
-if(UNIX)
+# Linux: strict POSIX + glibc feature macros. Darwin: _POSIX_C_SOURCE alone
+# hides IFF_UP / getifaddrs extensions in <net/if.h> (MotK macOS CI).
+if(UNIX AND NOT APPLE)
   target_compile_definitions(recomp_net PRIVATE _POSIX_C_SOURCE=200809L _DEFAULT_SOURCE)
+elseif(APPLE)
+  target_compile_definitions(recomp_net PRIVATE _DARWIN_C_SOURCE)
 endif()
 
 if(WIN32)
