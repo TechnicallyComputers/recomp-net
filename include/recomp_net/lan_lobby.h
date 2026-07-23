@@ -9,12 +9,11 @@ extern "C" {
 
 /* Small same-machine LAN-room registry used by launcher integrations.
  *
- * The registry complements (rather than replaces) a remote lobby service:
- * hosts may publish to both, and launchers merge this row with their remote
- * list. Two local processes share the record, remain in the room UI, and only
- * receive launch parameters after the host marks the room started. The stored
- * endpoint is still a normal LAN address usable by another machine when the
- * row is distributed by the remote lobby service. */
+ * LAN/Direct IP hosts publish here only; online hosts publish only to the
+ * remote lobby service. Launchers may still merge a local registry row with
+ * the remote list so a second process on the same machine can discover a
+ * LAN room. Two local processes share the record, remain in the room UI, and
+ * only receive launch parameters after the host marks the room started. */
 
 #define RNET_LAN_LOBBY_NAME_MAX       96
 #define RNET_LAN_LOBBY_GAME_MAX       64
@@ -57,6 +56,9 @@ int rnet_lan_lobby_join(const char *path, const char *expected_game,
 
 /* Host removes the room. Guest leave clears the guest slot and start flag. */
 int rnet_lan_lobby_leave(const char *path, int is_host);
+
+/* Host: clear the guest slot and start flag (kick). Room stays published. */
+int rnet_lan_lobby_kick(const char *path);
 
 /* Host-controlled waiting-room operations. */
 int rnet_lan_lobby_set_started(const char *path, int started);

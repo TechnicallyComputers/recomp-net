@@ -190,6 +190,12 @@ int rnet_lan_lobby_leave(const char *path, int is_host)
     return write_lobby(path, &lobby);
 }
 
+int rnet_lan_lobby_kick(const char *path)
+{
+    /* Same seat clear as guest leave; host keeps the published room. */
+    return rnet_lan_lobby_leave(path, 0);
+}
+
 int rnet_lan_lobby_set_started(const char *path, int started)
 {
     RNetLanLobby lobby;

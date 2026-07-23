@@ -56,6 +56,18 @@ void rnet_external_ipv4_config_init(RNetExternalIpv4Config *config);
 int rnet_external_ipv4_discover(const RNetExternalIpv4Config *config,
                                 char *out, size_t out_len);
 
+/* Exclusive UDP bind probe (no SO_REUSEADDR) so a busy lobby port is detected.
+ * Returns 1 when the port can be bound on INADDR_ANY, else 0. */
+int rnet_udp_port_available(int port);
+
+/* Online host create: try preferred, then the next ports. span <= 0 selects 32
+ * (MotK / recomp-ui contract). Returns a free port, or -1 when none in range. */
+int rnet_udp_find_free_port(int preferred, int span);
+
+/* Rewrite the port in a "host:port" endpoint (capacity includes NUL).
+ * Preserves the host; empty/missing host becomes 0.0.0.0. Returns 0 on success. */
+int rnet_endpoint_set_port(char *endpoint, size_t cap, int port);
+
 #ifdef __cplusplus
 }
 #endif

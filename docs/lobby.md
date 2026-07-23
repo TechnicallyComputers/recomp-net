@@ -36,12 +36,21 @@ Open-source clients (e.g. psxrecomp `psx_lobby_client` + vendored
 ## Local LAN room registry
 
 `recomp_net/lan_lobby.h` provides the small, server-independent room registry
-used by launchers running multiple instances on one machine. A host publishes
-an `RNetLanLobby` beside its configuration, and launchers merge that row with
-the remote WebSocket list. Joining claims the guest slot but does not start the
-game; both launchers continue showing their shared room until the host calls
-`rnet_lan_lobby_set_started()`.
+used by launchers running multiple instances on one machine. A LAN/Direct IP
+host publishes an `RNetLanLobby` beside its configuration; launchers may merge
+that row with the remote WebSocket list for discovery. Online hosts publish
+only to the lobby server and must not dual-publish here (join/member/start
+handling differs per channel). Joining claims the guest slot but does not
+start the game; both launchers continue showing their shared room until the
+host calls `rnet_lan_lobby_set_started()`.
 
-The registry complements the lobby server. Hosts should still publish the same
-LAN endpoint remotely so other machines can discover it. It does not carry
-input or replace `rnet_session_start_lan()`.
+Host kick clears the guest seat via `rnet_lan_lobby_kick()` while keeping the
+room published; the joiner drops out when the registry no longer lists them.
+
+Lobby create port policy is owned by **recomp-ui** (`launcher_udp_port.*`)
+before `create()`: LAN/Direct IP requires the exact UDP port; online scans
+preferred..preferred+31 and rewrites the endpoint. `rnet_udp_port_available` /
+`rnet_udp_find_free_port` remain available for hosts that need the same probe
+outside the launcher.
+
+The registry does not carry input or replace `rnet_session_start_lan()`.

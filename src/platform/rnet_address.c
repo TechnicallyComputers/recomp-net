@@ -389,3 +389,104 @@ int rnet_ipv4_enumerate(RNetIpv4Address *out, size_t capacity)
     free(candidates.items);
     return result;
 }
+
+int rnet_udp_port_available(int port)
+{
+    rnet_socket sock;
+    struct sockaddr_in addr;
+    int ok;
+
+    if (port <= 0 || port > 65535)
+    {
+        return 0;
+    }
+    sock = rnet_os_socket_create_dgram();
+    if (!rnet_os_socket_valid(sock))
+    {
+        return 0;
+    }
+    /* Intentionally no SO_REUSEADDR — a second host on the same lobby port
+     * must fail so create can surface "port in use". */
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons((unsigned short)port);
+    ok = (rnet_os_bind(sock, &addr) == 0) ? 1 : 0;
+    rnet_os_socket_destroy(&sock);
+    return ok;
+}
+
+int rnet_udp_find_free_port(int preferred, int span)
+{
+    int i;
+
+    if (preferred <= 0 || preferred > 65535)
+    {
+        preferred = 7777;
+    }
+    if (span <= 0)
+    {
+        span = 32;
+    }
+    for (i = 0; i < span; ++i)
+    {
+        const int port = preferred + i;
+        if (port > 65535)
+        {
+            break;
+        }
+        if (rnet_udp_port_available(port))
+        {
+            return port;
+        }
+    }
+    return -1;
+}
+
+int rnet_endpoint_set_port(char *endpoint, size_t cap, int port)
+{
+    char host[64];
+    char parsed_host[64];
+    rnet_u16 parsed_port = 0;
+    int n;
+
+    if (endpoint == NULL || cap < 4U || port <= 0 || port > 65535)
+    {
+        return -1;
+    }
+    if (rnet_os_parse_hostport(endpoint, parsed_host, sizeof(parsed_host),
+                               &parsed_port) == 0 &&
+        parsed_host[0] != '\0')
+    {
+        snprintf(host, sizeof(host), "%s", parsed_host);
+    }
+    else if (endpoint[0] == '\0' || endpoint[0] == ':')
+    {
+        snprintf(host, sizeof(host), "0.0.0.0");
+    }
+    else
+    {
+        const char *colon = strrchr(endpoint, ':');
+        size_t host_len;
+        if (colon == NULL)
+        {
+            snprintf(host, sizeof(host), "%s", endpoint);
+        }
+        else
+        {
+            host_len = (size_t)(colon - endpoint);
+            if (host_len >= sizeof(host))
+            {
+                host_len = sizeof(host) - 1U;
+            }
+            memcpy(host, endpoint, host_len);
+            host[host_len] = '\0';
+        }
+        if (host[0] == '\0')
+        {
+            snprintf(host, sizeof(host), "0.0.0.0");
+        }
+    }
+    n = snprintf(endpoint, cap, "%s:%d", host, port);
+    return (n > 0 && (size_t)n < cap) ? 0 : -1;
+}

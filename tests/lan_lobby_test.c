@@ -59,6 +59,14 @@ int main(void)
     expect(rnet_lan_lobby_read(path, "Metal Warriors", "0.1.0", &got) ==
                RNET_LAN_LOBBY_OK && got.joiner_name[0] == '\0',
            "guest slot cleared");
+    expect(rnet_lan_lobby_join(path, "Metal Warriors", "0.1.0", "secret",
+                               "Guest2", &got) == RNET_LAN_LOBBY_OK,
+           "guest rejoins");
+    expect(rnet_lan_lobby_kick(path) == RNET_LAN_LOBBY_OK, "host kicks guest");
+    expect(rnet_lan_lobby_read(path, "Metal Warriors", "0.1.0", &got) ==
+               RNET_LAN_LOBBY_OK && got.joiner_name[0] == '\0' &&
+               strcmp(got.host_name, "Host") == 0,
+           "kick clears guest and keeps room");
     expect(rnet_lan_lobby_leave(path, 1) == RNET_LAN_LOBBY_OK,
            "host removes room");
     expect(rnet_lan_lobby_read(path, NULL, NULL, &got) == RNET_LAN_LOBBY_ERR_IO,

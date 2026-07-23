@@ -120,6 +120,11 @@ if(RNET_BUILD_TESTS)
   target_link_libraries(lan_lobby_test PRIVATE recomp_net)
   add_test(NAME lan_lobby_test COMMAND lan_lobby_test)
 
+  add_executable(udp_port_test tests/udp_port_test.c)
+  target_link_libraries(udp_port_test PRIVATE recomp_net)
+  target_include_directories(udp_port_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  add_test(NAME udp_port_test COMMAND udp_port_test)
+
   add_executable(address_test tests/address_test.c)
   target_link_libraries(address_test PRIVATE recomp_net)
   target_include_directories(address_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
