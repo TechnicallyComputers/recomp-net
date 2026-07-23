@@ -39,9 +39,13 @@ ctest --test-dir build --output-on-failure
 ## Build with ICE
 
 Optional ICE transport uses [libjuice](https://github.com/paullouisageneau/libjuice).
-CMake looks for a system install, `RNET_LIBJUICE_ROOT`, or `third_party/libjuice`;
-if none is present it **FetchContent**-clones libjuice automatically (network required
-at configure time).
+
+By default (`RNET_ICE_BUNDLE_STATIC=ON`) CMake **FetchContent**-builds a
+**static** libjuice and links it into `recomp_net`, so host binaries do not
+need a distro `libjuice.so` at runtime (network required at configure if
+juice is not already cached). Set `-DRNET_ICE_BUNDLE_STATIC=OFF` to use
+`find_package(Libjuice)` / `RNET_LIBJUICE_ROOT` / `third_party/libjuice`
+instead (shared system juice OK).
 
 ```bash
 cmake -S . -B build-ice -DRNET_ENABLE_ICE=ON
