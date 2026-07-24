@@ -8,6 +8,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 const char *rnet_version_string(void)
 {
@@ -263,6 +264,33 @@ static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
         if (s->phase == RNET_PHASE_LINKING)
         {
             s->phase = RNET_PHASE_READY;
+        }
+        /* Guest adopts host delay before RUNNING (host slot 0 is authoritative). */
+        if (s->cfg.local_slot != 0 && pkt->local_slot == 0)
+        {
+            rnet_u8 hello_delay = pkt->delay;
+            if (hello_delay >= 2 && hello_delay <= 20 && hello_delay != s->delay)
+            {
+                if (s->phase != RNET_PHASE_RUNNING || s->sim_tick == 0)
+                {
+                    s->delay = hello_delay;
+                    s->cfg.input_delay = hello_delay;
+                    if (s->phase != RNET_PHASE_RUNNING)
+                        seed_delay_prefix(s);
+                }
+                else if (s->sim_tick > 0)
+                {
+                    static int delay_mismatch_logged;
+                    if (!delay_mismatch_logged)
+                    {
+                        fprintf(stderr,
+                                "recomp-net: HELLO delay mismatch local=%u peer=%u "
+                                "after RUNNING — not adopting\n",
+                                (unsigned)s->delay, (unsigned)hello_delay);
+                        delay_mismatch_logged = 1;
+                    }
+                }
+            }
         }
         break;
     case RNET_PKT_READY:
