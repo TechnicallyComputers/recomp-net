@@ -57,11 +57,16 @@ struct RNetIceAgent
     unsigned cand_tail;
     unsigned cand_count;
     char stun_host[128];
+    char turn_host[128];
+    char turn_user[192];
+    char turn_pass[128];
+    char bind_address[64];
     juice_turn_server_t turn;
     int turn_count;
     int controlling;
     int gather_started;
     int gather_pending;
+    int selected_logged;
 };
 
 static RNetIceState map_juice_state(juice_state_t st)
@@ -116,13 +121,44 @@ static void queue_cand(RNetIceAgent *a, const char *sdp)
     a->cand_count++;
 }
 
+static void log_selected_pair(RNetIceAgent *a)
+{
+    char local_cand[512];
+    char remote_cand[512];
+    char local_addr[256];
+    char remote_addr[256];
+    if (a == NULL || a->agent == NULL || a->selected_logged)
+        return;
+    local_cand[0] = remote_cand[0] = local_addr[0] = remote_addr[0] = '\0';
+    if (juice_get_selected_candidates(a->agent, local_cand, sizeof(local_cand),
+                                      remote_cand, sizeof(remote_cand)) == 0) {
+        fprintf(stderr,
+                "rnet_ice: selected candidates\n  local:  %s\n  remote: %s\n",
+                local_cand[0] ? local_cand : "(none)",
+                remote_cand[0] ? remote_cand : "(none)");
+        a->selected_logged = 1;
+    }
+    if (juice_get_selected_addresses(a->agent, local_addr, sizeof(local_addr),
+                                     remote_addr, sizeof(remote_addr)) == 0) {
+        fprintf(stderr, "rnet_ice: selected addresses local=%s remote=%s\n",
+                local_addr[0] ? local_addr : "(none)",
+                remote_addr[0] ? remote_addr : "(none)");
+    }
+}
+
 static void on_state_changed(juice_agent_t *agent, juice_state_t state, void *user_ptr)
 {
     RNetIceAgent *a = (RNetIceAgent *)user_ptr;
+    RNetIceState mapped;
     (void)agent;
+    mapped = map_juice_state(state);
     ice_mutex_lock(&a->mutex);
-    a->state = map_juice_state(state);
+    a->state = mapped;
     ice_mutex_unlock(&a->mutex);
+    if (mapped == RNET_ICE_STATE_CONNECTED || mapped == RNET_ICE_STATE_COMPLETED)
+        log_selected_pair(a);
+    else if (mapped == RNET_ICE_STATE_FAILED)
+        fprintf(stderr, "rnet_ice: state=FAILED (check STUN/TURN / NAT path)\n");
 }
 
 static void on_candidate(juice_agent_t *agent, const char *sdp, void *user_ptr)
@@ -197,17 +233,21 @@ RNetIceAgent *rnet_ice_agent_create(const RNetIceConfig *cfg, RNetIceSignalEmitF
     if (cfg->turn_host != NULL && cfg->turn_host[0] != '\0' && cfg->turn_user != NULL && cfg->turn_pass != NULL)
     {
         memset(&a->turn, 0, sizeof(a->turn));
-        a->turn.host = cfg->turn_host;
+        snprintf(a->turn_host, sizeof(a->turn_host), "%s", cfg->turn_host);
+        snprintf(a->turn_user, sizeof(a->turn_user), "%s", cfg->turn_user);
+        snprintf(a->turn_pass, sizeof(a->turn_pass), "%s", cfg->turn_pass);
+        a->turn.host = a->turn_host;
         a->turn.port = cfg->turn_port ? cfg->turn_port : 3478;
-        a->turn.username = cfg->turn_user;
-        a->turn.password = cfg->turn_pass;
+        a->turn.username = a->turn_user;
+        a->turn.password = a->turn_pass;
         jcfg.turn_servers = &a->turn;
         jcfg.turn_servers_count = 1;
         a->turn_count = 1;
     }
-    if (cfg->bind_address != NULL)
+    if (cfg->bind_address != NULL && cfg->bind_address[0] != '\0')
     {
-        jcfg.bind_address = cfg->bind_address;
+        snprintf(a->bind_address, sizeof(a->bind_address), "%s", cfg->bind_address);
+        jcfg.bind_address = a->bind_address;
     }
     if (cfg->bind_port != 0)
     {

@@ -21,14 +21,16 @@ and SDP/candidate exchange are owned by the host (or a future custom lobby).
 1. Pass `on_signal` in `RNetHostVTable` before `rnet_session_start_ice`.
 2. Forward every outbound signal to the peer through your lobby channel.
 3. Deliver inbound signals with `rnet_session_push_signal`.
-4. Supply STUN/TURN in `RNetIceConfig` (TURN user/pass from your credential
-   service — the library does not fetch them).
+4. Supply STUN/TURN in `RNetIceConfig` before gather. The library does not
+   fetch credentials; snesrecomp’s WS lobby client mints Coturn creds via
+   `get_turn_credentials` / `turn_credentials` and passes them into
+   `snes_netplay_start` (or use `SNES_NET_TURN_*` env overrides).
 
-## Mapping to a future lobby server
+## Mapping to the WS lobby server
 
-A lobby protocol can treat each `RNetSignal` as a 1:1 envelope field (type +
-flag + text). No ticket IDs or automatch poll shapes are required by this
-library.
+recomp-net-server’s WebSocket lobby treats each `RNetSignal` as a 1:1
+envelope (`op:signal` type + flag + text). TURN minting is a separate
+`get_turn_credentials` op (same HMAC shape as HTTP `/v1/turn-credentials`).
 
 ## LAN-only
 
