@@ -54,6 +54,9 @@ int rnet_lan_direct_host_ping(RNetLanDirectHost *host);
 int rnet_lan_direct_host_notify_start(RNetLanDirectHost *host,
                                       const RNetLanLobby *room);
 
+/* Host: push updated input_delay while a direct guest is seated. */
+int rnet_lan_direct_host_notify_caps(RNetLanDirectHost *host, int input_delay);
+
 /* Tell guest they were kicked / host left. */
 int rnet_lan_direct_host_notify_kick(RNetLanDirectHost *host);
 int rnet_lan_direct_host_notify_close(RNetLanDirectHost *host);

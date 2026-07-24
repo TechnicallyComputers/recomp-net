@@ -31,6 +31,7 @@ typedef struct RNetLanLobby {
     char password[RNET_LAN_LOBBY_PASSWORD_MAX];
     int started;
     int host_slot;
+    int input_delay; /* host-authoritative delay frames (default 2) */
 } RNetLanLobby;
 
 enum {

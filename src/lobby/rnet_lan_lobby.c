@@ -1,5 +1,6 @@
 #include "recomp_net/lan_lobby.h"
 
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -47,6 +48,15 @@ static int read_field(FILE *file, char *out, size_t out_size)
     return 1;
 }
 
+static int clamp_lan_input_delay(int delay)
+{
+    if (delay < 2)
+        return 2;
+    if (delay > 20)
+        return 20;
+    return delay;
+}
+
 static int write_lobby(const char *path, const RNetLanLobby *lobby)
 {
     FILE *file;
@@ -60,7 +70,7 @@ static int write_lobby(const char *path, const RNetLanLobby *lobby)
     {
         return RNET_LAN_LOBBY_ERR_IO;
     }
-    write_field(file, "RNET_LAN_LOBBY_1");
+    write_field(file, "RNET_LAN_LOBBY_2");
     write_field(file, lobby->name);
     write_field(file, lobby->game);
     write_field(file, lobby->game_version);
@@ -68,8 +78,11 @@ static int write_lobby(const char *path, const RNetLanLobby *lobby)
     write_field(file, lobby->host_name);
     write_field(file, lobby->joiner_name);
     write_field(file, lobby->password);
-    ok = fprintf(file, "%d\n%d\n", lobby->started ? 1 : 0,
-                 lobby->host_slot == 1 ? 1 : 0) > 0;
+    ok = fprintf(file, "%d\n%d\n%d\n", lobby->started ? 1 : 0,
+                 lobby->host_slot == 1 ? 1 : 0,
+                 clamp_lan_input_delay(lobby->input_delay >= 2
+                                           ? lobby->input_delay
+                                           : 2)) > 0;
     if (fclose(file) != 0)
     {
         ok = 0;
@@ -88,6 +101,10 @@ int rnet_lan_lobby_publish(const char *path, const RNetLanLobby *lobby)
     clean = *lobby;
     clean.started = clean.started ? 1 : 0;
     clean.host_slot = clean.host_slot == 1 ? 1 : 0;
+    if (clean.input_delay < 2)
+        clean.input_delay = 2;
+    if (clean.input_delay > 20)
+        clean.input_delay = 20;
     return write_lobby(path, &clean);
 }
 
@@ -98,6 +115,7 @@ int rnet_lan_lobby_read(const char *path, const char *expected_game,
     char magic[32];
     char started[16];
     char host_slot[16];
+    char input_delay_line[16];
     RNetLanLobby lobby;
     if (path == NULL || out == NULL)
     {
@@ -123,8 +141,23 @@ int rnet_lan_lobby_read(const char *path, const char *expected_game,
     READ_FIELD(started);
     READ_FIELD(host_slot);
 #undef READ_FIELD
+    lobby.input_delay = 2;
+    if (strcmp(magic, "RNET_LAN_LOBBY_2") == 0)
+    {
+        if (!read_field(file, input_delay_line, sizeof(input_delay_line)))
+        {
+            fclose(file);
+            return RNET_LAN_LOBBY_ERR_IO;
+        }
+        lobby.input_delay = clamp_lan_input_delay((int)strtol(input_delay_line, NULL, 10));
+    }
     fclose(file);
-    if (strcmp(magic, "RNET_LAN_LOBBY_1") != 0 || lobby.endpoint[0] == '\0')
+    if (strcmp(magic, "RNET_LAN_LOBBY_1") != 0 &&
+        strcmp(magic, "RNET_LAN_LOBBY_2") != 0)
+    {
+        return RNET_LAN_LOBBY_ERR_IDENTITY;
+    }
+    if (lobby.endpoint[0] == '\0')
     {
         return RNET_LAN_LOBBY_ERR_IDENTITY;
     }

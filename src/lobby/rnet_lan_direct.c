@@ -94,13 +94,38 @@ static int build_join_req(char *buf, size_t cap, const char *game,
     return RNET_LAN_DIRECT_OK;
 }
 
+static int clamp_direct_input_delay(int delay)
+{
+    if (delay < 2)
+        return 2;
+    if (delay > 20)
+        return 20;
+    return delay;
+}
+
+static int parse_direct_input_delay_line(const char *line, int def)
+{
+    long v;
+    char *end;
+    if (!line || !line[0])
+        return def;
+    v = strtol(line, &end, 10);
+    if (end == line || *end != '\0')
+        return def;
+    return clamp_direct_input_delay((int)v);
+}
+
 static int build_join_ok(char *buf, size_t cap, const RNetLanLobby *room)
 {
     char slot[8];
+    char delay_line[16];
     size_t o = 0;
     if (!room)
         return RNET_LAN_DIRECT_ERR_ARGUMENT;
     snprintf(slot, sizeof(slot), "%d", room->host_slot == 1 ? 1 : 0);
+    snprintf(delay_line, sizeof(delay_line), "%d",
+             clamp_direct_input_delay(room->input_delay >= 2 ? room->input_delay
+                                                             : 2));
     if (!append_line(buf, cap, &o, RNET_DJ_MAGIC) ||
         !append_line(buf, cap, &o, "JOIN_OK") ||
         !append_line(buf, cap, &o, room->endpoint) ||
@@ -109,7 +134,8 @@ static int build_join_ok(char *buf, size_t cap, const RNetLanLobby *room)
         !append_line(buf, cap, &o, slot) ||
         !append_line(buf, cap, &o, room->name) ||
         !append_line(buf, cap, &o, room->game) ||
-        !append_line(buf, cap, &o, room->game_version))
+        !append_line(buf, cap, &o, room->game_version) ||
+        !append_line(buf, cap, &o, delay_line))
         return RNET_LAN_DIRECT_ERR_ARGUMENT;
     return RNET_LAN_DIRECT_OK;
 }
@@ -129,6 +155,32 @@ static int build_simple(char *buf, size_t cap, const char *op)
     size_t o = 0;
     if (!append_line(buf, cap, &o, RNET_DJ_MAGIC) ||
         !append_line(buf, cap, &o, op ? op : ""))
+        return RNET_LAN_DIRECT_ERR_ARGUMENT;
+    return RNET_LAN_DIRECT_OK;
+}
+
+static int build_start(char *buf, size_t cap, int input_delay)
+{
+    char delay_line[16];
+    size_t o = 0;
+    snprintf(delay_line, sizeof(delay_line), "%d",
+             clamp_direct_input_delay(input_delay));
+    if (!append_line(buf, cap, &o, RNET_DJ_MAGIC) ||
+        !append_line(buf, cap, &o, "START") ||
+        !append_line(buf, cap, &o, delay_line))
+        return RNET_LAN_DIRECT_ERR_ARGUMENT;
+    return RNET_LAN_DIRECT_OK;
+}
+
+static int build_caps(char *buf, size_t cap, int input_delay)
+{
+    char delay_line[16];
+    size_t o = 0;
+    snprintf(delay_line, sizeof(delay_line), "%d",
+             clamp_direct_input_delay(input_delay));
+    if (!append_line(buf, cap, &o, RNET_DJ_MAGIC) ||
+        !append_line(buf, cap, &o, "CAPS") ||
+        !append_line(buf, cap, &o, delay_line))
         return RNET_LAN_DIRECT_ERR_ARGUMENT;
     return RNET_LAN_DIRECT_OK;
 }
@@ -345,10 +397,23 @@ int rnet_lan_direct_host_notify_start(RNetLanDirectHost *host,
                                       const RNetLanLobby *room)
 {
     char buf[RNET_DJ_MAX_PKT];
-    (void)room;
+    int delay = 2;
     if (!host || !host->guest_known)
         return RNET_LAN_DIRECT_ERR_IO;
-    if (build_simple(buf, sizeof(buf), "START") != 0)
+    if (room)
+        delay = clamp_direct_input_delay(room->input_delay >= 2 ? room->input_delay
+                                                                : 2);
+    if (build_start(buf, sizeof(buf), delay) != 0)
+        return RNET_LAN_DIRECT_ERR_ARGUMENT;
+    return send_text(host->sock, &host->guest, buf);
+}
+
+int rnet_lan_direct_host_notify_caps(RNetLanDirectHost *host, int input_delay)
+{
+    char buf[RNET_DJ_MAX_PKT];
+    if (!host || !host->guest_known)
+        return RNET_LAN_DIRECT_ERR_IO;
+    if (build_caps(buf, sizeof(buf), input_delay) != 0)
         return RNET_LAN_DIRECT_ERR_ARGUMENT;
     return send_text(host->sock, &host->guest, buf);
 }
@@ -506,6 +571,7 @@ int rnet_lan_direct_guest_join(const char *host_hostport,
             const char *name = next_line(&cursor);
             const char *game = next_line(&cursor);
             const char *version = next_line(&cursor);
+            const char *delay_line = next_line(&cursor);
             snprintf(out_room->endpoint, sizeof(out_room->endpoint), "%s",
                      endpoint && endpoint[0] ? endpoint : host_hostport);
             snprintf(out_room->host_name, sizeof(out_room->host_name), "%s",
@@ -525,6 +591,8 @@ int rnet_lan_direct_guest_join(const char *host_hostport,
                      version && version[0] ? version : expected_version);
             out_room->started = 0;
             out_room->password[0] = '\0';
+            out_room->input_delay =
+                parse_direct_input_delay_line(delay_line, 2);
         }
         g->host = src; /* reply path may differ from typed dest after NAT */
         *out_guest = g;
@@ -590,9 +658,18 @@ int rnet_lan_direct_guest_pump(RNetLanDirectGuest *guest, RNetLanLobby *room,
         return 0;
     }
     if (strcmp(op, "START") == 0) {
-        if (room)
+        const char *delay_line = next_line(&cursor);
+        if (room) {
             room->started = 1;
+            room->input_delay = parse_direct_input_delay_line(delay_line, 2);
+        }
         return 1;
+    }
+    if (strcmp(op, "CAPS") == 0) {
+        const char *delay_line = next_line(&cursor);
+        if (room)
+            room->input_delay = parse_direct_input_delay_line(delay_line, 2);
+        return 0;
     }
     if (strcmp(op, "KICK") == 0 || strcmp(op, "CLOSE") == 0)
         return 2;
