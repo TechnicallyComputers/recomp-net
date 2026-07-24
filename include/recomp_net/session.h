@@ -34,6 +34,14 @@ void rnet_session_destroy(RNetSession *s);
 int rnet_session_start_lan(RNetSession *s, const char *bind_hostport, const char *peer_hostport);
 
 /*
+ * Host-as-relay: bind UDP and fan-out delay-sync datagrams to every learned
+ * guest seat. Transport role is independent of sim local_slot (lobby owner
+ * hubs; guests dial host_endpoint). Use when slot_count >= 3 and the lobby
+ * server input relay is not enabled.
+ */
+int rnet_session_start_lan_hub(RNetSession *s, const char *bind_hostport);
+
+/*
  * Start ICE-backed session (requires RNET_ENABLE_ICE). After create, host must
  * exchange signals via on_signal / rnet_session_push_signal until COMPLETED.
  */
@@ -83,6 +91,27 @@ int rnet_session_local_slot(const RNetSession *s);
 rnet_u32 rnet_session_sim_tick(const RNetSession *s);
 int rnet_session_is_running(const RNetSession *s);
 RNetIceState rnet_session_ice_state(const RNetSession *s);
+
+/*
+ * Snapshot for catch-up / diagnostics. Filled by rnet_session_get_stats.
+ */
+typedef struct RNetSessionStats
+{
+    rnet_u32 sim_tick;
+    rnet_u8 delay;
+    rnet_u8 local_slot;
+    rnet_u8 slot_count;
+    int is_running;
+    int peer_gone;
+    rnet_u64 last_peer_rx_age_ms;
+    rnet_u32 highest_remote_wire;
+    int remote_lead; /* highest_remote_wire - sim_tick (can be negative) */
+    int input_desync;
+    rnet_u32 desync_tick;
+    RNetIceState ice_state;
+} RNetSessionStats;
+
+void rnet_session_get_stats(const RNetSession *s, RNetSessionStats *out);
 
 /* Savestate / SRAM transfer ops for rnet_session_state_begin / probe. */
 #define RNET_STATE_OP_SAVE 0 /* peer stores file; admit stalls until probe/xfer done */

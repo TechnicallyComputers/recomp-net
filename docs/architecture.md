@@ -45,3 +45,11 @@ There is no prediction window in v1.
   to the ICE agent; session stays `IDLE` until ICE reaches `COMPLETED`, then
   enters `LINKING` and runs the same bootstrap/admission path over ICE
   datagrams.
+
+## Host-as-relay (LAN hub)
+
+For 3+ seats without the lobby server input relay, the lobby owner calls
+`rnet_session_start_lan_hub` (empty peer). Guests call `rnet_session_start_lan`
+with the host endpoint. Transport hub role is independent of sim `local_slot`.
+The hub learns seats from packet `local_slot` and fans out raw datagrams to
+every other known seat (star topology).
