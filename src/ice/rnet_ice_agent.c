@@ -67,7 +67,7 @@ struct RNetIceAgent
     int gather_started;
     int gather_pending;
     int selected_logged;
-    int force_relay; /* runtime and/or RNET_ICE_FORCE_TURN */
+    int force_relay; /* runtime cfg->force_relay and/or RNET_ICE_FORCE_TURN */
 };
 
 static RNetIceState map_juice_state(juice_state_t st)

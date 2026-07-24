@@ -34,6 +34,14 @@ void rnet_session_destroy(RNetSession *s);
 int rnet_session_start_lan(RNetSession *s, const char *bind_hostport, const char *peer_hostport);
 
 /*
+ * Host-as-relay: bind UDP and fan-out delay-sync datagrams to every learned
+ * guest seat. Transport role is independent of sim local_slot (lobby owner
+ * hubs; guests dial host_endpoint). Use when slot_count >= 3 and the lobby
+ * server input relay is not enabled.
+ */
+int rnet_session_start_lan_hub(RNetSession *s, const char *bind_hostport);
+
+/*
  * Start ICE-backed session (requires RNET_ENABLE_ICE). After create, host must
  * exchange signals via on_signal / rnet_session_push_signal until COMPLETED.
  */
@@ -86,7 +94,6 @@ RNetIceState rnet_session_ice_state(const RNetSession *s);
 
 /*
  * Snapshot for catch-up / diagnostics. Filled by rnet_session_get_stats.
- * Strings are NUL-terminated and owned by the caller buffer.
  */
 typedef struct RNetSessionStats
 {

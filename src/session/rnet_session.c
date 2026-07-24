@@ -1060,6 +1060,23 @@ int rnet_session_start_lan(RNetSession *s, const char *bind_hostport, const char
     return 0;
 }
 
+int rnet_session_start_lan_hub(RNetSession *s, const char *bind_hostport)
+{
+    if (s == NULL)
+    {
+        return -1;
+    }
+    /* Transport fan-out hub (lobby owner). Sim local_slot is independent —
+     * seats may be reordered; guests still dial this peer's endpoint. */
+    if (rnet_transport_start_lan_hub(&s->transport, bind_hostport) != 0)
+    {
+        return -1;
+    }
+    s->phase = RNET_PHASE_LINKING;
+    s->last_hello_ms = 0;
+    return 0;
+}
+
 int rnet_session_start_ice(RNetSession *s, const RNetIceConfig *ice)
 {
 #if !defined(RNET_ENABLE_ICE)
