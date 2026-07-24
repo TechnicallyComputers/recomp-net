@@ -84,6 +84,28 @@ rnet_u32 rnet_session_sim_tick(const RNetSession *s);
 int rnet_session_is_running(const RNetSession *s);
 RNetIceState rnet_session_ice_state(const RNetSession *s);
 
+/*
+ * Snapshot for catch-up / diagnostics. Filled by rnet_session_get_stats.
+ * Strings are NUL-terminated and owned by the caller buffer.
+ */
+typedef struct RNetSessionStats
+{
+    rnet_u32 sim_tick;
+    rnet_u8 delay;
+    rnet_u8 local_slot;
+    rnet_u8 slot_count;
+    int is_running;
+    int peer_gone;
+    rnet_u64 last_peer_rx_age_ms;
+    rnet_u32 highest_remote_wire;
+    int remote_lead; /* highest_remote_wire - sim_tick (can be negative) */
+    int input_desync;
+    rnet_u32 desync_tick;
+    RNetIceState ice_state;
+} RNetSessionStats;
+
+void rnet_session_get_stats(const RNetSession *s, RNetSessionStats *out);
+
 /* Savestate / SRAM transfer ops for rnet_session_state_begin / probe. */
 #define RNET_STATE_OP_SAVE 0 /* peer stores file; admit stalls until probe/xfer done */
 #define RNET_STATE_OP_LOAD 1 /* stalls admit until guest has blob */

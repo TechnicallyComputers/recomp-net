@@ -9,11 +9,10 @@ extern "C" {
 
 /* Small same-machine LAN-room registry used by launcher integrations.
  *
- * LAN/Direct IP hosts publish here only; online hosts publish only to the
- * remote lobby service. Launchers may still merge a local registry row with
- * the remote list so a second process on the same machine can discover a
- * LAN room. Two local processes share the record, remain in the room UI, and
- * only receive launch parameters after the host marks the room started. */
+ * LAN/Direct IP hosts publish here for local discovery (second process on the
+ * same machine). Cross-machine Join Direct uses UDP seat-claim in
+ * lan_direct.h on the advertised game port (port-forward / same LAN). Online
+ * hosts publish only to the remote lobby service. */
 
 #define RNET_LAN_LOBBY_NAME_MAX       96
 #define RNET_LAN_LOBBY_GAME_MAX       64

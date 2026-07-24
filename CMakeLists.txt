@@ -22,6 +22,7 @@ set(RNET_CORE_SOURCES
   src/protocol/rnet_protocol.c
   src/input/rnet_rings.c
   src/lobby/rnet_lan_lobby.c
+  src/lobby/rnet_lan_direct.c
   src/transport/rnet_transport.c
   src/session/rnet_session.c
   src/ice/rnet_ice_state.c

@@ -1477,6 +1477,46 @@ RNetIceState rnet_session_ice_state(const RNetSession *s)
     return rnet_ice_agent_state(s->ice);
 }
 
+void rnet_session_get_stats(const RNetSession *s, RNetSessionStats *out)
+{
+    rnet_u8 slot;
+    rnet_u32 highest_remote = 0;
+    rnet_u64 now;
+    int have_remote = 0;
+
+    if (out == NULL)
+        return;
+    memset(out, 0, sizeof(*out));
+    if (s == NULL)
+        return;
+
+    out->sim_tick = s->sim_tick;
+    out->delay = s->delay;
+    out->local_slot = s->cfg.local_slot;
+    out->slot_count = s->cfg.slot_count;
+    out->is_running = (s->phase == RNET_PHASE_RUNNING) ? 1 : 0;
+    out->peer_gone = s->peer_gone;
+    out->input_desync = s->input_desync;
+    out->desync_tick = s->desync_tick;
+    out->ice_state = rnet_session_ice_state(s);
+
+    now = session_now((RNetSession *)s);
+    if (s->last_peer_rx_ms != 0)
+        out->last_peer_rx_age_ms = now - s->last_peer_rx_ms;
+
+    for (slot = 0; slot < s->cfg.slot_count; ++slot) {
+        rnet_u32 tip;
+        if (slot == s->cfg.local_slot)
+            continue;
+        tip = rnet_ring_highest_valid(&s->remote_rings[slot]);
+        if (!have_remote || tip > highest_remote)
+            highest_remote = tip;
+        have_remote = 1;
+    }
+    out->highest_remote_wire = highest_remote;
+    out->remote_lead = have_remote ? (int)highest_remote - (int)s->sim_tick : 0;
+}
+
 int rnet_session_state_probe(RNetSession *s, rnet_u8 op, rnet_u8 slot, rnet_u32 total_size, rnet_u32 payload_crc)
 {
     if ((s == NULL) || s->cfg.local_slot != 0 || s->phase != RNET_PHASE_RUNNING)
