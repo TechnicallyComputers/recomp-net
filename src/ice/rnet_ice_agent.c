@@ -63,11 +63,14 @@ struct RNetIceAgent
     char bind_address[64];
     juice_turn_server_t turn;
     int turn_count;
+    rnet_u16 stun_port;
+    rnet_u16 bind_port;
     int controlling;
     int gather_started;
     int gather_pending;
     int selected_logged;
     int force_relay; /* runtime cfg->force_relay and/or RNET_ICE_FORCE_TURN */
+    int relay_fallback_done; /* auto-retried with force_relay once */
 };
 
 static RNetIceState map_juice_state(juice_state_t st)
@@ -167,6 +170,70 @@ static int ice_candidate_is_relay(const char *sdp)
     return sdp != NULL && strstr(sdp, " typ relay") != NULL;
 }
 
+static const char *ice_candidate_type(const char *sdp)
+{
+    if (sdp == NULL || sdp[0] == '\0')
+        return "unknown";
+    if (strstr(sdp, " typ relay") != NULL)
+        return "relay";
+    if (strstr(sdp, " typ srflx") != NULL)
+        return "srflx";
+    if (strstr(sdp, " typ prflx") != NULL)
+        return "prflx";
+    if (strstr(sdp, " typ host") != NULL)
+        return "host";
+    return "unknown";
+}
+
+void rnet_ice_agent_selected_info(const RNetIceAgent *agent, char *path_out, size_t path_len,
+                                  char *local_addr_out, size_t local_addr_len,
+                                  char *remote_addr_out, size_t remote_addr_len)
+{
+    char local_cand[512];
+    char remote_cand[512];
+    const char *local_ty;
+    const char *remote_ty;
+    const char *path = "unknown";
+
+    if (path_out && path_len)
+        path_out[0] = '\0';
+    if (local_addr_out && local_addr_len)
+        local_addr_out[0] = '\0';
+    if (remote_addr_out && remote_addr_len)
+        remote_addr_out[0] = '\0';
+    if (agent == NULL || agent->agent == NULL)
+        return;
+
+    local_cand[0] = remote_cand[0] = '\0';
+    if (juice_get_selected_candidates(agent->agent, local_cand, sizeof(local_cand),
+                                      remote_cand, sizeof(remote_cand)) == 0) {
+        local_ty = ice_candidate_type(local_cand);
+        remote_ty = ice_candidate_type(remote_cand);
+        /* Prefer remote type for NAT path; escalate to relay if either side is. */
+        if (strcmp(local_ty, "relay") == 0 || strcmp(remote_ty, "relay") == 0)
+            path = "relay";
+        else if (strcmp(remote_ty, "unknown") != 0)
+            path = remote_ty;
+        else
+            path = local_ty;
+    }
+    if (path_out && path_len)
+        snprintf(path_out, path_len, "%s", path);
+
+    if (local_addr_out && local_addr_len && remote_addr_out && remote_addr_len) {
+        (void)juice_get_selected_addresses(agent->agent, local_addr_out, local_addr_len,
+                                           remote_addr_out, remote_addr_len);
+    } else if (local_addr_out && local_addr_len) {
+        char discard[256];
+        (void)juice_get_selected_addresses(agent->agent, local_addr_out, local_addr_len,
+                                           discard, sizeof(discard));
+    } else if (remote_addr_out && remote_addr_len) {
+        char discard[256];
+        (void)juice_get_selected_addresses(agent->agent, discard, sizeof(discard),
+                                           remote_addr_out, remote_addr_len);
+    }
+}
+
 static void on_candidate(juice_agent_t *agent, const char *sdp, void *user_ptr)
 {
     RNetIceAgent *a = (RNetIceAgent *)user_ptr;
@@ -213,10 +280,63 @@ static void emit_signal(RNetIceAgent *a, RNetSignalType type, const char *text, 
     a->emit(&msg, a->user);
 }
 
+static void ice_reset_runtime(RNetIceAgent *a)
+{
+    if (a->agent != NULL)
+    {
+        juice_destroy(a->agent);
+        a->agent = NULL;
+    }
+    ice_mutex_lock(&a->mutex);
+    a->recv_head = a->recv_tail = a->recv_count = 0;
+    a->cand_head = a->cand_tail = a->cand_count = 0;
+    a->gathering_done_posted = 0;
+    ice_mutex_unlock(&a->mutex);
+    a->remote_desc_set = 0;
+    a->gather_started = 0;
+    a->gather_pending = 0;
+    a->selected_logged = 0;
+    a->state = RNET_ICE_STATE_IDLE;
+}
+
+static int ice_create_juice(RNetIceAgent *a)
+{
+    juice_config_t jcfg;
+
+    memset(&jcfg, 0, sizeof(jcfg));
+    if (a->stun_host[0] != '\0')
+    {
+        jcfg.stun_server_host = a->stun_host;
+        jcfg.stun_server_port = a->stun_port ? a->stun_port : 3478;
+    }
+    if (a->turn_count > 0)
+    {
+        a->turn.host = a->turn_host;
+        a->turn.username = a->turn_user;
+        a->turn.password = a->turn_pass;
+        jcfg.turn_servers = &a->turn;
+        jcfg.turn_servers_count = 1;
+    }
+    if (a->bind_address[0] != '\0')
+        jcfg.bind_address = a->bind_address;
+    if (a->bind_port != 0)
+    {
+        jcfg.local_port_range_begin = a->bind_port;
+        jcfg.local_port_range_end = a->bind_port;
+    }
+    jcfg.cb_state_changed = on_state_changed;
+    jcfg.cb_candidate = on_candidate;
+    jcfg.cb_gathering_done = on_gathering_done;
+    jcfg.cb_recv = on_recv;
+    jcfg.user_ptr = a;
+
+    a->agent = juice_create(&jcfg);
+    return a->agent != NULL ? 0 : -1;
+}
+
 RNetIceAgent *rnet_ice_agent_create(const RNetIceConfig *cfg, RNetIceSignalEmitFn emit, void *user)
 {
     RNetIceAgent *a;
-    juice_config_t jcfg;
     if (cfg == NULL)
     {
         return NULL;
@@ -231,54 +351,39 @@ RNetIceAgent *rnet_ice_agent_create(const RNetIceConfig *cfg, RNetIceSignalEmitF
     a->user = user;
     a->state = RNET_ICE_STATE_IDLE;
 
-    memset(&jcfg, 0, sizeof(jcfg));
     if (cfg->stun_host != NULL && cfg->stun_host[0] != '\0')
     {
         snprintf(a->stun_host, sizeof(a->stun_host), "%s", cfg->stun_host);
-        jcfg.stun_server_host = a->stun_host;
-        jcfg.stun_server_port = cfg->stun_port ? cfg->stun_port : 3478;
+        a->stun_port = cfg->stun_port ? cfg->stun_port : 3478;
     }
-    if (cfg->turn_host != NULL && cfg->turn_host[0] != '\0' && cfg->turn_user != NULL && cfg->turn_pass != NULL)
+    if (cfg->turn_host != NULL && cfg->turn_host[0] != '\0' && cfg->turn_user != NULL &&
+        cfg->turn_pass != NULL)
     {
         memset(&a->turn, 0, sizeof(a->turn));
         snprintf(a->turn_host, sizeof(a->turn_host), "%s", cfg->turn_host);
         snprintf(a->turn_user, sizeof(a->turn_user), "%s", cfg->turn_user);
         snprintf(a->turn_pass, sizeof(a->turn_pass), "%s", cfg->turn_pass);
-        a->turn.host = a->turn_host;
         a->turn.port = cfg->turn_port ? cfg->turn_port : 3478;
-        a->turn.username = a->turn_user;
-        a->turn.password = a->turn_pass;
-        jcfg.turn_servers = &a->turn;
-        jcfg.turn_servers_count = 1;
         a->turn_count = 1;
     }
     if (cfg->bind_address != NULL && cfg->bind_address[0] != '\0')
-    {
         snprintf(a->bind_address, sizeof(a->bind_address), "%s", cfg->bind_address);
-        jcfg.bind_address = a->bind_address;
-    }
-    if (cfg->bind_port != 0)
-    {
-        jcfg.local_port_range_begin = cfg->bind_port;
-        jcfg.local_port_range_end = cfg->bind_port;
-    }
-    jcfg.cb_state_changed = on_state_changed;
-    jcfg.cb_candidate = on_candidate;
-    jcfg.cb_gathering_done = on_gathering_done;
-    jcfg.cb_recv = on_recv;
-    jcfg.user_ptr = a;
+    a->bind_port = cfg->bind_port;
 
-    a->agent = juice_create(&jcfg);
-    if (a->agent == NULL)
+    a->force_relay = cfg->force_relay ? 1 : 0;
+#if defined(RNET_ICE_FORCE_TURN)
+    a->force_relay = 1;
+#endif
+    /* libjuice has no public set_ice_controlling; role follows offer/answer:
+     * controlling gathers immediately; controlled waits for remote SDP. */
+    a->controlling = cfg->controlling ? 1 : 0;
+
+    if (ice_create_juice(a) != 0)
     {
         ice_mutex_destroy(&a->mutex);
         free(a);
         return NULL;
     }
-    a->force_relay = cfg->force_relay ? 1 : 0;
-#if defined(RNET_ICE_FORCE_TURN)
-    a->force_relay = 1;
-#endif
     if (a->force_relay)
     {
         if (a->turn_count == 0)
@@ -294,10 +399,37 @@ RNetIceAgent *rnet_ice_agent_create(const RNetIceConfig *cfg, RNetIceSignalEmitF
                     "used\n");
         }
     }
-    /* libjuice has no public set_ice_controlling; role follows offer/answer:
-     * controlling gathers immediately; controlled waits for remote SDP. */
-    a->controlling = cfg->controlling ? 1 : 0;
     return a;
+}
+
+int rnet_ice_agent_has_turn(const RNetIceAgent *agent)
+{
+    return agent != NULL && agent->turn_count > 0;
+}
+
+int rnet_ice_agent_is_force_relay(const RNetIceAgent *agent)
+{
+    return agent != NULL && agent->force_relay != 0;
+}
+
+int rnet_ice_agent_relay_fallback_done(const RNetIceAgent *agent)
+{
+    return agent != NULL && agent->relay_fallback_done != 0;
+}
+
+int rnet_ice_agent_restart_force_relay(RNetIceAgent *agent)
+{
+    if (agent == NULL || agent->turn_count == 0 || agent->relay_fallback_done)
+        return -1;
+    agent->force_relay = 1;
+    agent->relay_fallback_done = 1;
+    fprintf(stderr,
+            "rnet_ice: auto TURN fallback — restarting ICE with force_relay "
+            "(STUN/host path failed or stalled)\n");
+    ice_reset_runtime(agent);
+    if (ice_create_juice(agent) != 0)
+        return -1;
+    return rnet_ice_agent_start_gathering(agent);
 }
 
 void rnet_ice_agent_destroy(RNetIceAgent *agent)
@@ -388,7 +520,7 @@ void rnet_ice_agent_poll(RNetIceAgent *agent)
 
 void rnet_ice_agent_push_signal(RNetIceAgent *agent, const RNetSignal *msg)
 {
-    if ((agent == NULL) || (agent->agent == NULL) || (msg == NULL))
+    if ((agent == NULL) || (msg == NULL))
     {
         return;
     }
@@ -397,6 +529,23 @@ void rnet_ice_agent_push_signal(RNetIceAgent *agent, const RNetSignal *msg)
     case RNET_SIGNAL_REMOTE_SDP:
         if (msg->text[0] != '\0')
         {
+            /* Peer ICE restart (e.g. their TURN fallback): rebuild local
+             * juice so set_remote_description applies a fresh offer. */
+            if (agent->remote_desc_set)
+            {
+                if (agent->turn_count > 0 && !agent->force_relay)
+                {
+                    agent->force_relay = 1;
+                    agent->relay_fallback_done = 1;
+                    fprintf(stderr,
+                            "rnet_ice: peer ICE restart — adopting force_relay\n");
+                }
+                ice_reset_runtime(agent);
+                if (ice_create_juice(agent) != 0)
+                    break;
+            }
+            if (agent->agent == NULL)
+                break;
             if (juice_set_remote_description(agent->agent, msg->text) == 0)
             {
                 agent->remote_desc_set = 1;
@@ -408,20 +557,20 @@ void rnet_ice_agent_push_signal(RNetIceAgent *agent, const RNetSignal *msg)
         }
         break;
     case RNET_SIGNAL_REMOTE_CANDIDATE:
-        if (msg->text[0] != '\0')
-        {
-            if (agent->force_relay && !ice_candidate_is_relay(msg->text))
-                break;
-            (void)juice_add_remote_candidate(agent->agent, msg->text);
-        }
+        if (agent->agent == NULL || msg->text[0] == '\0')
+            break;
+        if (agent->force_relay && !ice_candidate_is_relay(msg->text))
+            break;
+        (void)juice_add_remote_candidate(agent->agent, msg->text);
         break;
     case RNET_SIGNAL_GATHERING_DONE:
-        (void)juice_set_remote_gathering_done(agent->agent);
+        if (agent->agent != NULL)
+            (void)juice_set_remote_gathering_done(agent->agent);
         break;
     case RNET_SIGNAL_SET_CONTROLLING:
         /* Advisory for gather order; libjuice resolves role via SDP/conflicts. */
         agent->controlling = msg->flag ? 1 : 0;
-        if (agent->controlling && agent->gather_pending)
+        if (agent->controlling && agent->gather_pending && agent->agent != NULL)
         {
             (void)ice_gather_now(agent);
         }
