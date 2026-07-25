@@ -39,9 +39,13 @@ ctest --test-dir build --output-on-failure
 ## Build with ICE
 
 Optional ICE transport uses [libjuice](https://github.com/paullouisageneau/libjuice).
-CMake looks for a system install, `RNET_LIBJUICE_ROOT`, or `third_party/libjuice`;
-if none is present it **FetchContent**-clones libjuice automatically (network required
-at configure time).
+
+By default (`RNET_ICE_BUNDLE_STATIC=ON`) CMake **FetchContent**-builds a
+**static** libjuice and links it into `recomp_net`, so host binaries do not
+need a distro `libjuice.so` at runtime (network required at configure if
+juice is not already cached). Set `-DRNET_ICE_BUNDLE_STATIC=OFF` to use
+`find_package(Libjuice)` / `RNET_LIBJUICE_ROOT` / `third_party/libjuice`
+instead (shared system juice OK).
 
 ```bash
 cmake -S . -B build-ice -DRNET_ENABLE_ICE=ON
@@ -87,6 +91,67 @@ for (;;) {
 
 See [docs/host_integration.md](docs/host_integration.md).
 
+## Recommended host / recomp-engine patches
+
+recomp-net alone does not make a recomp title feel good online. The **host
+loop and engine** (snesrecomp / psxrecomp / game `main`) need a few patterns
+that shipping MotK / SNES titles already use. Prefer putting these in the
+**shared engine / facade** so every game inherits them — not one-off copies in
+each title’s `main.c`.
+
+### Frame loop (stability + feel)
+
+| Do | Why |
+|----|-----|
+| On admit **stall**: re-present the last framebuffer, poll events, pace ~1 frame (~16 ms). **Do not** busy-spin or skip present. | Avoids frozen window / OS “not responding” and audio underrun while waiting on the peer. |
+| Prefer `rnet_session_wait_recv` (LAN) over bare `Sleep` in the admit barrier. | Wakes when UDP is readable instead of burning the delay budget blind. |
+| Latch delay-sync **starvation**: after sustained admit misses, keep `pump` (retransmit) while holding; clear when `remote_lead >= D` for a few frames. | Recovers from jitter without inventing inputs. |
+| After starvation clears, resume **~1 sim / wall frame** and let the input buffer rebuild. Avoid large “recovery burst” catch-up by default. | Turbo catch-up feels worse than a short soft buffer rebuild. |
+| Optional catch-up only when `remote_lead > D`, capped (e.g. env `SNES_NET_CATCHUP_CAP`; default **0** in snesrecomp). | Drains surplus lead without fighting the delay runway. |
+
+Reference shape (SNES facade): `snes_host_barrier_admit` +
+`snes_host_catchup_budget` in snesrecomp — stall → held present; admit →
+`RtlRunFrame` (+ optional burst).
+
+### Pads, threading, audio (determinism)
+
+| Do | Why |
+|----|-----|
+| Use `publish` / published pads as the **only** controller source for locked sim ticks. | Local-only pad reads desync peers immediately. |
+| One thread owns `pump` + `try_admit` + sim `advance` (or an external mutex). | Session API is not internally locked. |
+| Disable wall-clock APU / audio “catch-up” while netplay is active; keep guest-frame–coupled audio. | Independent audio catch-up advances time differently per peer. |
+| Keep RNG, timers, and frame pacing deterministic; put host-authoritative entropy in the pad blob if needed. | Library does not fix host desyncs. |
+
+### Session lifecycle
+
+| Do | Why |
+|----|-----|
+| Poll `rnet_session_peer_disconnected(~1500)` and `input_desync` while waiting; soft-exit to lobby. | Snappy leave instead of infinite stall. |
+| Call `rnet_session_send_bye` before destroy. | Peer can drop without waiting out the silence timeout. |
+| After LOAD / savestate: host probe → apply → `hard_resync` + `prime_delay_inputs` on both sides; keep the app barrier until `try_admit` works again. | Avoid tip/history collisions across the load epoch. |
+| Rematch / soft-return: `session_reset` sticky LLE / frame gates; do not reuse a stale UDP `session_id`. | Second match in one process otherwise inherits dead state. |
+
+### Transport / ICE (online)
+
+| Do | Why |
+|----|-----|
+| Online MotK-style lobbies: always ICE (do not demote to LAN because of a rewritten private peer IP). | Hairpin / wrong advertise breaks P2P. |
+| Mint Coturn TURN; for carrier CGNAT / mobile hotspot, host **Force TURN** (`force_relay`) for all peers. | STUN/`prflx` “success” is often flaky on CGNAT. |
+| Keep library auto TURN fallback (FAILED / stuck / dead non-relay path) — both peers need a build that supports it. | Answerer alone cannot re-offer; controlling must restart. |
+| Ensure INPUT bundles cover the full delay prefix at start (`D+1` ticks including 0). `RNET_MAX_BUNDLE` is **21**; never truncate the low end of the window. | Truncation deadlocks admit at `sim_tick==0` (`wait_remote_input`). |
+| Lobby `match_caps` host-authoritative for `input_delay`, `force_turn`, `force_input_relay`. | Guests must not overwrite host delay/TURN policy on fill. |
+
+### Where to implement
+
+| Layer | Put here |
+|-------|----------|
+| **recomp-net** | Session, ICE, TURN fallback, bundle size, protocol |
+| **Engine facade** (e.g. `snes_netplay` / `psx_netplay`, `snes_host_*`) | Barrier admit, starvation latch, catch-up budget, soft-exit, diag JSONL |
+| **recomp-ui** | Lobby Settings (delay, Force TURN, server input relay), UDP bind policy |
+| **Game title** | Thin identity / `fill_match_caps`, pad sample hook, present-held callback, connect-timeout modal |
+
+SNES-oriented checklist: snesrecomp `docs/RECOMP_NET.md` (“Per-game patches” + host loop). Library API detail: [docs/host_integration.md](docs/host_integration.md).
+
 ## Docs
 
 | Doc | Topic |
@@ -96,6 +161,7 @@ See [docs/host_integration.md](docs/host_integration.md).
 | [docs/signaling.md](docs/signaling.md) | ICE signaling contract |
 | [docs/host_integration.md](docs/host_integration.md) | Hooking a recomp host |
 | [docs/address_discovery.md](docs/address_discovery.md) | Selecting a LAN address to advertise |
+| [docs/lobby.md](docs/lobby.md) | Lobby server contract (sibling repo) |
 
 ## Non-goals (v1)
 
