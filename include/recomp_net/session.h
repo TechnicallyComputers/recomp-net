@@ -92,8 +92,24 @@ rnet_u32 rnet_session_sim_tick(const RNetSession *s);
 int rnet_session_is_running(const RNetSession *s);
 RNetIceState rnet_session_ice_state(const RNetSession *s);
 
+/* Why try_admit last returned 0 (or OK when last call admitted). */
+typedef enum RNetAdmitStall
+{
+    RNET_ADMIT_OK = 0,
+    RNET_ADMIT_NOT_RUNNING,
+    RNET_ADMIT_STATE_XFER,
+    RNET_ADMIT_SIM_MISMATCH,
+    RNET_ADMIT_DESYNC,
+    RNET_ADMIT_WAIT_LOCAL_INPUT,
+    RNET_ADMIT_WAIT_REMOTE_INPUT,
+    RNET_ADMIT_WAIT_CONFIRM
+} RNetAdmitStall;
+
+const char *rnet_admit_stall_name(RNetAdmitStall reason);
+
 /*
  * Snapshot for catch-up / diagnostics. Filled by rnet_session_get_stats.
+ * ice_* strings are NUL-terminated buffers owned by this struct.
  */
 typedef struct RNetSessionStats
 {
@@ -106,9 +122,24 @@ typedef struct RNetSessionStats
     rnet_u64 last_peer_rx_age_ms;
     rnet_u32 highest_remote_wire;
     int remote_lead; /* highest_remote_wire - sim_tick (can be negative) */
+    RNetAdmitStall last_stall;
+    rnet_u32 consecutive_stalls;
+    rnet_u32 admit_ok_count;
+    rnet_u32 stall_streaks; /* completed stall streaks (not barrier spins) */
+    rnet_u32 last_admit_wait_ms;
+    rnet_u32 max_admit_wait_ms;
     int input_desync;
     rnet_u32 desync_tick;
+    rnet_u32 desync_local_hash;
+    rnet_u32 desync_remote_hash;
     RNetIceState ice_state;
+    char ice_path[16];   /* host|srflx|prflx|relay|lan|pending|failed|unknown */
+    char ice_local[96];
+    char ice_remote[96];
+    int state_busy;
+    rnet_u8 state_op;
+    rnet_u32 packets_rx;
+    rnet_u32 input_bundle_sends;
 } RNetSessionStats;
 
 void rnet_session_get_stats(const RNetSession *s, RNetSessionStats *out);

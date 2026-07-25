@@ -101,6 +101,19 @@ struct RNetSession
      * so pre-resync tip rows cannot clobber the post-hard_resync epoch
      * (tick % RNET_HISTORY_LENGTH collisions). Cleared by prime_delay_inputs. */
     int input_send_suppress;
+    /* Diagnostics (JSONL / HUD). */
+    RNetAdmitStall last_stall;
+    rnet_u32 consecutive_stalls;
+    rnet_u32 admit_ok_count;
+    rnet_u32 stall_streaks;
+    rnet_u64 stall_started_ms;
+    rnet_u32 last_admit_wait_ms;
+    rnet_u32 max_admit_wait_ms;
+    rnet_u32 packets_rx;
+    rnet_u32 input_bundle_sends;
+    /* ICE TURN auto-fallback timers (monotonic ms). */
+    rnet_u64 ice_attempt_ms;
+    rnet_u64 ice_completed_ms;
 };
 
 static rnet_u64 session_now(RNetSession *s)
@@ -110,6 +123,57 @@ static rnet_u64 session_now(RNetSession *s)
         return s->host.now_ms(s->host.ctx);
     }
     return rnet_os_monotonic_ms();
+}
+
+const char *rnet_admit_stall_name(RNetAdmitStall reason)
+{
+    switch (reason) {
+    case RNET_ADMIT_OK: return "ok";
+    case RNET_ADMIT_NOT_RUNNING: return "not_running";
+    case RNET_ADMIT_STATE_XFER: return "state_xfer";
+    case RNET_ADMIT_SIM_MISMATCH: return "sim_mismatch";
+    case RNET_ADMIT_DESYNC: return "desync";
+    case RNET_ADMIT_WAIT_LOCAL_INPUT: return "wait_local_input";
+    case RNET_ADMIT_WAIT_REMOTE_INPUT: return "wait_remote_input";
+    case RNET_ADMIT_WAIT_CONFIRM: return "wait_confirm";
+    default: return "unknown";
+    }
+}
+
+static void note_admit_stall(RNetSession *s, RNetAdmitStall reason)
+{
+    rnet_u64 now;
+    if (s == NULL)
+        return;
+    s->last_stall = reason;
+    if (s->consecutive_stalls == 0)
+        s->stall_streaks++;
+    s->consecutive_stalls++;
+    now = session_now(s);
+    if (s->stall_started_ms == 0)
+        s->stall_started_ms = now ? now : 1;
+    s->last_admit_wait_ms = (rnet_u32)(now - s->stall_started_ms);
+    if (s->last_admit_wait_ms > s->max_admit_wait_ms)
+        s->max_admit_wait_ms = s->last_admit_wait_ms;
+}
+
+static void note_admit_ok(RNetSession *s)
+{
+    rnet_u64 now;
+    if (s == NULL)
+        return;
+    now = session_now(s);
+    if (s->stall_started_ms != 0) {
+        s->last_admit_wait_ms = (rnet_u32)(now - s->stall_started_ms);
+        if (s->last_admit_wait_ms > s->max_admit_wait_ms)
+            s->max_admit_wait_ms = s->last_admit_wait_ms;
+        s->stall_started_ms = 0;
+    } else {
+        s->last_admit_wait_ms = 0;
+    }
+    s->last_stall = RNET_ADMIT_OK;
+    s->consecutive_stalls = 0;
+    s->admit_ok_count++;
 }
 
 static void send_raw(RNetSession *s, const rnet_u8 *buf, int len);
@@ -397,6 +461,7 @@ static void pump_recv(RNetSession *s)
         {
             rnet_transport_accept_pending_peer(&s->transport);
             s->last_peer_rx_ms = session_now(s);
+            s->packets_rx++;
             handle_decoded(s, &pkt);
         }
     }
@@ -848,11 +913,12 @@ static void send_input_bundle(RNetSession *s)
 {
     rnet_u8 buf[RNET_MAX_PACKET];
     RNetWireFrame frames[RNET_MAX_BUNDLE];
-    int count = 0;
     int red = (int)s->cfg.bundle_redundancy;
     rnet_u32 tip;
+    rnet_u32 lo;
     rnet_u32 t;
-    int len;
+    rnet_u32 ack;
+    int sent_any = 0;
     rnet_u64 now = session_now(s);
 
     if (s->phase != RNET_PHASE_RUNNING)
@@ -877,39 +943,55 @@ static void send_input_bundle(RNetSession *s)
         red = 1;
     }
     /* Startup must carry the complete neutral delay prefix. Otherwise delays
-     * larger than the ordinary redundancy window can never admit tick zero. */
+     * larger than one INPUT packet can never admit tick zero. Do not clamp
+     * this window to RNET_MAX_BUNDLE — emit multiple packets instead. */
     if (red < (int)s->delay + 1)
     {
         red = (int)s->delay + 1;
     }
-    if (red > RNET_MAX_BUNDLE)
+    lo = (tip + 1U > (rnet_u32)red) ? (tip + 1U - (rnet_u32)red) : 0U;
+    ack = rnet_ring_highest_valid(
+        &s->remote_rings[(s->cfg.local_slot + 1) % s->cfg.slot_count]);
+    t = lo;
+    while (t <= tip)
     {
-        red = RNET_MAX_BUNDLE;
-    }
-    for (t = (tip + 1U > (rnet_u32)red) ? (tip + 1U - (rnet_u32)red) : 0U; t <= tip; ++t)
-    {
-        RNetInputSample sample;
-        if (!rnet_ring_get(&s->local_ring, t, &sample))
+        int count = 0;
+        int len;
+        while (t <= tip && count < RNET_MAX_BUNDLE)
+        {
+            RNetInputSample sample;
+            if (rnet_ring_get(&s->local_ring, t, &sample))
+            {
+                frames[count].tick = sample.tick;
+                frames[count].size = sample.size;
+                memcpy(frames[count].bytes, sample.bytes, sample.size);
+                count++;
+            }
+            if (t == 0xffffffffu)
+            {
+                break;
+            }
+            t++;
+        }
+        if (count == 0)
         {
             continue;
         }
-        frames[count].tick = sample.tick;
-        frames[count].size = sample.size;
-        memcpy(frames[count].bytes, sample.bytes, sample.size);
-        count++;
-        if (count >= red)
+        len = rnet_proto_encode_input(buf, sizeof(buf), s->cfg.protocol_magic,
+                                      s->cfg.session_id, s->cfg.local_slot, ack,
+                                      frames, count);
+        if (len < 0)
         {
             break;
         }
+        send_raw(s, buf, len);
+        s->input_bundle_sends++;
+        sent_any = 1;
     }
-    if (count == 0)
+    if (!sent_any)
     {
         return;
     }
-    len = rnet_proto_encode_input(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id, s->cfg.local_slot,
-                                  rnet_ring_highest_valid(&s->remote_rings[(s->cfg.local_slot + 1) % s->cfg.slot_count]),
-                                  frames, count);
-    send_raw(s, buf, len);
     s->last_input_ms = now;
     s->last_input_tip = tip;
     s->last_input_tip_valid = 1;
@@ -1118,6 +1200,11 @@ int rnet_session_start_ice(RNetSession *s, const RNetIceConfig *ice)
         return -1;
     }
     local = *ice;
+    if (s->ice != NULL)
+    {
+        rnet_ice_agent_destroy(s->ice);
+        s->ice = NULL;
+    }
     s->ice = rnet_ice_agent_create(&local, ice_emit_bridge, s);
     if (s->ice == NULL)
     {
@@ -1129,6 +1216,8 @@ int rnet_session_start_ice(RNetSession *s, const RNetIceConfig *ice)
     s->transport.ice_send = ice_send_bridge;
     s->transport.ice_recv = ice_recv_bridge;
     s->transport.ice_ctx = s->ice;
+    s->ice_attempt_ms = session_now(s);
+    s->ice_completed_ms = 0;
     if (rnet_ice_agent_start_gathering(s->ice) != 0)
     {
         return -1;
@@ -1139,6 +1228,73 @@ int rnet_session_start_ice(RNetSession *s, const RNetIceConfig *ice)
 #endif
 }
 
+#if defined(RNET_ENABLE_ICE)
+/* After STUN/host ICE fails or stalls, one automatic gather with force_relay
+ * when TURN credentials are present. Opt out: RNET_ICE_NO_RELAY_FALLBACK=1. */
+static void session_maybe_ice_relay_fallback(RNetSession *s)
+{
+    RNetIceState st;
+    rnet_u64 now;
+    rnet_u64 stuck_ms = 12000ULL;
+    rnet_u64 dead_ms = 6000ULL;
+    const char *env;
+    char path[32];
+
+    if (s == NULL || s->ice == NULL || s->phase == RNET_PHASE_RUNNING)
+        return;
+    if (rnet_ice_agent_relay_fallback_done(s->ice) || rnet_ice_agent_is_force_relay(s->ice))
+        return;
+    if (!rnet_ice_agent_has_turn(s->ice))
+        return;
+    env = getenv("RNET_ICE_NO_RELAY_FALLBACK");
+    if (env != NULL && env[0] != '\0' && env[0] != '0')
+        return;
+    env = getenv("RNET_ICE_RELAY_FALLBACK_MS");
+    if (env != NULL && env[0] != '\0')
+    {
+        long v = strtol(env, NULL, 10);
+        if (v >= 3000L && v <= 60000L)
+            stuck_ms = (rnet_u64)v;
+    }
+    env = getenv("RNET_ICE_RELAY_DEAD_MS");
+    if (env != NULL && env[0] != '\0')
+    {
+        long v = strtol(env, NULL, 10);
+        if (v >= 2000L && v <= 30000L)
+            dead_ms = (rnet_u64)v;
+    }
+
+    now = session_now(s);
+    st = rnet_ice_agent_state(s->ice);
+    if (st == RNET_ICE_STATE_FAILED)
+        goto do_fallback;
+    if (st != RNET_ICE_STATE_CONNECTED && st != RNET_ICE_STATE_COMPLETED)
+    {
+        if (s->ice_attempt_ms != 0ULL && now - s->ice_attempt_ms >= stuck_ms)
+            goto do_fallback;
+        return;
+    }
+    /* Completed on a non-relay path but no session packets yet — flaky CGNAT. */
+    if (s->last_peer_rx_ms == 0ULL && s->ice_completed_ms != 0ULL &&
+        now - s->ice_completed_ms >= dead_ms)
+    {
+        path[0] = '\0';
+        rnet_ice_agent_selected_info(s->ice, path, sizeof(path), NULL, 0, NULL, 0);
+        if (path[0] != '\0' && strcmp(path, "relay") != 0)
+            goto do_fallback;
+    }
+    return;
+
+do_fallback:
+    if (rnet_ice_agent_restart_force_relay(s->ice) != 0)
+        return;
+    s->transport.ice_ctx = s->ice;
+    s->ice_attempt_ms = now;
+    s->ice_completed_ms = 0;
+    s->phase = RNET_PHASE_IDLE;
+}
+#endif
+
 void rnet_session_pump(RNetSession *s)
 {
     if (s == NULL)
@@ -1147,10 +1303,15 @@ void rnet_session_pump(RNetSession *s)
     }
     if (s->ice != NULL)
     {
+#if defined(RNET_ENABLE_ICE)
+        session_maybe_ice_relay_fallback(s);
+#endif
         rnet_ice_agent_poll(s->ice);
         if (s->phase == RNET_PHASE_IDLE && rnet_ice_agent_state(s->ice) == RNET_ICE_STATE_COMPLETED)
         {
             s->phase = RNET_PHASE_LINKING;
+            if (s->ice_completed_ms == 0ULL)
+                s->ice_completed_ms = session_now(s);
         }
     }
     pump_recv(s);
@@ -1217,20 +1378,25 @@ int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick)
 
     if ((s == NULL) || (s->phase != RNET_PHASE_RUNNING))
     {
+        if (s)
+            note_admit_stall(s, RNET_ADMIT_NOT_RUNNING);
         return 0;
     }
     if (s->state_stall_sim && (s->state_active || s->state_probe_active))
     {
         /* Stall while probe or chunked transfer is in flight. */
+        note_admit_stall(s, RNET_ADMIT_STATE_XFER);
         return 0;
     }
     if (sim_tick != s->sim_tick)
     {
         /* Host must advance in lockstep with session clock. */
+        note_admit_stall(s, RNET_ADMIT_SIM_MISMATCH);
         return 0;
     }
     if (s->input_desync)
     {
+        note_admit_stall(s, RNET_ADMIT_DESYNC);
         return 0;
     }
 
@@ -1265,6 +1431,7 @@ int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick)
         else
         {
             send_input_bundle(s);
+            note_admit_stall(s, RNET_ADMIT_WAIT_LOCAL_INPUT);
             return 0;
         }
     }
@@ -1272,6 +1439,7 @@ int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick)
     if (!remotes_ready_for_play_wire(s, play_wire))
     {
         send_input_bundle(s);
+        note_admit_stall(s, RNET_ADMIT_WAIT_REMOTE_INPUT);
         return 0;
     }
 
@@ -1288,6 +1456,7 @@ int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick)
             RNetInputSample remote;
             if (!rnet_ring_get(&s->remote_rings[slot], play_wire, &remote))
             {
+                note_admit_stall(s, RNET_ADMIT_WAIT_REMOTE_INPUT);
                 return 0;
             }
             resolved[slot] = remote;
@@ -1297,8 +1466,11 @@ int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick)
 
     hash = hash_resolved_inputs(sim_tick, resolved, (int)s->cfg.slot_count);
 
-    if (!prepare_wire_confirm(s, play_wire, 0) || s->input_desync)
+    if (!prepare_wire_confirm(s, play_wire, 0) || s->input_desync) {
+        note_admit_stall(s, s->input_desync ? RNET_ADMIT_DESYNC
+                                            : RNET_ADMIT_WAIT_CONFIRM);
         return 0;
+    }
     if (s->published_hash[play_wire % RNET_HISTORY_LENGTH] != hash)
     {
         s->input_desync = 1;
@@ -1306,15 +1478,18 @@ int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick)
         s->desync_local_hash = hash;
         s->desync_remote_hash =
             s->published_hash[play_wire % RNET_HISTORY_LENGTH];
+        note_admit_stall(s, RNET_ADMIT_DESYNC);
         return 0;
     }
     if (!wire_confirmations_agree(s, play_wire))
     {
         (void)prepare_wire_confirm(s, play_wire, 0);
         send_input_bundle(s);
+        note_admit_stall(s, RNET_ADMIT_WAIT_CONFIRM);
         return 0;
     }
     s->host.publish(sim_tick, resolved, (int)s->cfg.slot_count, s->host.ctx);
+    note_admit_ok(s);
     return 1;
 
 #if 0 /* Legacy strict confirmation barrier; superseded by delay pipeline. */
@@ -1543,11 +1718,30 @@ void rnet_session_get_stats(const RNetSession *s, RNetSessionStats *out)
     out->peer_gone = s->peer_gone;
     out->input_desync = s->input_desync;
     out->desync_tick = s->desync_tick;
+    out->desync_local_hash = s->desync_local_hash;
+    out->desync_remote_hash = s->desync_remote_hash;
     out->ice_state = rnet_session_ice_state(s);
+    out->last_stall = s->last_stall;
+    out->consecutive_stalls = s->consecutive_stalls;
+    out->admit_ok_count = s->admit_ok_count;
+    out->stall_streaks = s->stall_streaks;
+    out->last_admit_wait_ms = s->last_admit_wait_ms;
+    out->max_admit_wait_ms = s->max_admit_wait_ms;
+    out->state_busy = (s->state_active || s->state_probe_active) ? 1 : 0;
+    out->state_op = s->state_active ? s->state_op
+                    : (s->state_probe_active ? s->state_probe_op : 0);
+    out->packets_rx = s->packets_rx;
+    out->input_bundle_sends = s->input_bundle_sends;
 
     now = session_now((RNetSession *)s);
     if (s->last_peer_rx_ms != 0)
         out->last_peer_rx_age_ms = now - s->last_peer_rx_ms;
+    /* Refresh live stall wait while still blocked. */
+    if (s->stall_started_ms != 0 && s->last_stall != RNET_ADMIT_OK) {
+        out->last_admit_wait_ms = (rnet_u32)(now - s->stall_started_ms);
+        if (out->last_admit_wait_ms > out->max_admit_wait_ms)
+            out->max_admit_wait_ms = out->last_admit_wait_ms;
+    }
 
     for (slot = 0; slot < s->cfg.slot_count; ++slot) {
         rnet_u32 tip;
@@ -1560,6 +1754,23 @@ void rnet_session_get_stats(const RNetSession *s, RNetSessionStats *out)
     }
     out->highest_remote_wire = highest_remote;
     out->remote_lead = have_remote ? (int)highest_remote - (int)s->sim_tick : 0;
+
+#if defined(RNET_ENABLE_ICE)
+    if (s->ice != NULL) {
+        rnet_ice_agent_selected_info(s->ice, out->ice_path, sizeof(out->ice_path),
+                                     out->ice_local, sizeof(out->ice_local),
+                                     out->ice_remote, sizeof(out->ice_remote));
+        if (out->ice_state == RNET_ICE_STATE_FAILED)
+            snprintf(out->ice_path, sizeof(out->ice_path), "failed");
+        else if (out->ice_state != RNET_ICE_STATE_CONNECTED &&
+                 out->ice_state != RNET_ICE_STATE_COMPLETED &&
+                 out->ice_path[0] == '\0')
+            snprintf(out->ice_path, sizeof(out->ice_path), "pending");
+    } else
+#endif
+    {
+        snprintf(out->ice_path, sizeof(out->ice_path), "lan");
+    }
 }
 
 int rnet_session_state_probe(RNetSession *s, rnet_u8 op, rnet_u8 slot, rnet_u32 total_size, rnet_u32 payload_crc)
