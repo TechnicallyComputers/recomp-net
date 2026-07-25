@@ -44,6 +44,10 @@ There is no prediction window in v1.
 - `rnet_session_start_ice` (when `RNET_ENABLE_ICE`) wires transport callbacks
   to the ICE agent; session stays `IDLE` until ICE reaches `COMPLETED`, then
   enters `LINKING` and runs the same bootstrap/admission path over ICE
+- With TURN credentials and without `force_relay`, `rnet_session_pump` may
+  restart ICE once with relay-only candidates on `FAILED`, gather stall
+  (~12s), or completed non-relay with no session packets (~6s). Opt out:
+  `RNET_ICE_NO_RELAY_FALLBACK=1`
   datagrams.
 
 ## Host-as-relay (LAN hub)

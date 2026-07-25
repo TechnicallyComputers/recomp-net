@@ -53,6 +53,8 @@ typedef struct RNetIceConfig
     rnet_u16 bind_port;
     /* Non-zero = offerer: gather immediately. Zero = answerer: wait for remote SDP. */
     rnet_u8 controlling;
+    /* Non-zero = only use typ relay candidates (requires TURN in this config). */
+    rnet_u8 force_relay;
 } RNetIceConfig;
 
 static inline void rnet_ice_config_init_defaults(RNetIceConfig *cfg)
@@ -70,6 +72,7 @@ static inline void rnet_ice_config_init_defaults(RNetIceConfig *cfg)
     cfg->bind_address = NULL;
     cfg->bind_port = 0;
     cfg->controlling = 1;
+    cfg->force_relay = 0;
 }
 
 const char *rnet_ice_state_name(RNetIceState st);
