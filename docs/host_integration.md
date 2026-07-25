@@ -1,5 +1,9 @@
 # Host integration
 
+For the full **performance / stability checklist** (held present on stall,
+starvation latch, catch-up policy, ICE/TURN, audio, rematch), see the
+“Recommended host / recomp-engine patches” section in the [root README](../README.md).
+
 ## Required loop
 
 ```c
