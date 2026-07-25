@@ -23,7 +23,10 @@ extern "C" {
 #define RNET_PKT_STATE_PROBE_REPLY 12 /* guest→host: match (skip xfer) or not */
 
 #define RNET_MAX_PACKET 1200
-#define RNET_MAX_BUNDLE 8
+/* Must be >= max input_delay (20) + 1 so the neutral delay prefix can fit in
+ * one INPUT bundle. send_input_bundle also multi-packets if the window is
+ * larger, but keeping this at 21 avoids a D>=8 boot deadlock. */
+#define RNET_MAX_BUNDLE 21
 #define RNET_STATE_CHUNK_MAX 1024
 /* PSX .pst + dual memcards need multi‑MB; chunked ACK path scales with this. */
 #define RNET_STATE_MAX (8u * 1024u * 1024u)
