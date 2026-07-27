@@ -42,7 +42,9 @@ target_include_directories(recomp_net
 
 target_compile_definitions(recomp_net PRIVATE $<$<PLATFORM_ID:Windows>:_CRT_SECURE_NO_WARNINGS>)
 if(UNIX)
-  target_compile_definitions(recomp_net PRIVATE _POSIX_C_SOURCE=200809L _DEFAULT_SOURCE)
+  # _DARWIN_C_SOURCE: strict _POSIX_C_SOURCE hides IFF_UP etc. in macOS headers
+  target_compile_definitions(recomp_net PRIVATE _POSIX_C_SOURCE=200809L _DEFAULT_SOURCE
+    $<$<PLATFORM_ID:Darwin>:_DARWIN_C_SOURCE>)
 endif()
 
 if(WIN32)
