@@ -38,6 +38,15 @@ target_include_directories(recomp_net
 target_compile_definitions(recomp_net PRIVATE $<$<PLATFORM_ID:Windows>:_CRT_SECURE_NO_WARNINGS>)
 if(UNIX)
   target_compile_definitions(recomp_net PRIVATE _POSIX_C_SOURCE=200809L _DEFAULT_SOURCE)
+  # Darwin gates the BSD extensions in <net/if.h> behind
+  # `!_POSIX_C_SOURCE || _DARWIN_C_SOURCE`, so requesting strict POSIX above
+  # hides IFF_UP, which rnet_address.c uses to skip down interfaces
+  # (src/platform/rnet_address.c:355). _DEFAULT_SOURCE is a glibc feature
+  # macro and does nothing here. Without this the macOS build fails to
+  # compile.
+  if(APPLE)
+    target_compile_definitions(recomp_net PRIVATE _DARWIN_C_SOURCE)
+  endif()
 endif()
 
 if(WIN32)
