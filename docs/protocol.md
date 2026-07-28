@@ -34,8 +34,8 @@ Emitted by slot 0 when all slots are ready. Sets `sim_tick` and enters
 
 ### INPUT (4)
 
-`local_slot : u8`, `frame_count : u8`, `pad : u8×2`, `ack_tick : u32`, then
-`frame_count` frames:
+`local_slot : u8`, `frame_count : u8`, `input_epoch : u16` (LE), `ack_tick : u32`,
+then `frame_count` frames:
 
 | Field | Size |
 |-------|------|
@@ -44,6 +44,8 @@ Emitted by slot 0 when all slots are ready. Sets `sim_tick` and enters
 | bytes | `size` (≤ `RNET_INPUT_MAX`) |
 
 Bundles retransmit recent local wire rows (`bundle_redundancy`).
+`input_epoch` bumps on `hard_resync` (post-load); receivers drop other-epoch
+packets so in-flight tips cannot first-wins into the new `sim_tick=0` window.
 
 ### DELAY_SYNC (5)
 
@@ -54,13 +56,15 @@ Optional mid-session delay change. Applied when not past the effective tick
 
 ### INPUT_CONFIRM (6)
 
-`local_slot : u8`, `pad : u8×3`, `sim_tick : u32`, `input_hash : u32`
+`local_slot : u8`, `input_epoch : u16` (LE), `pad : u8`, `sim_tick : u32`,
+`input_hash : u32`
 
 Peers agree on the resolved pad set for `sim_tick` before publish/advance.
 `input_hash` is `rnet_proto_checksum` over `sim_tick` (LE u32) followed by each
 slot's `size` (LE u16) and `bytes`. Session latches local/remote wire rows
 (first-wins) so late retransmits cannot change the hash mid-confirm.
 Mismatch flags an input desync; agreement across all slots allows admission.
+Same `input_epoch` rule as INPUT.
 
 ### BYE (7)
 
@@ -98,7 +102,8 @@ identical.
   local write is done). Does **not** stall admit (deferred saves must still
   reach a block boundary).
 - `op=LOAD`, `total_size == 0`: post-load ready rendezvous (not a content hash).
-  Host stalls admit until the guest ACKs.
+  Does **not** stall INPUT (late applier still needs tip rows); the app freezes
+  sim until mutual ready + `hard_resync`.
 - Hash probes (`total_size != 0`): stall until agree or transfer.
 
 **PROBE_REPLY:** `local_slot`, `op`, `slot`, `match : u8` (1 = agree / coord done).

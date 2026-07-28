@@ -60,15 +60,17 @@ static int mapped_ipv4_is_valid(rnet_u32 address)
     return first != 0U && first < 224U && address != 0xffffffffU;
 }
 
-int rnet_stun_parse_binding_response(
+int rnet_stun_parse_binding_response_ex(
     const rnet_u8 *packet, size_t packet_len,
     const rnet_u8 transaction_id[RNET_STUN_TRANSACTION_ID_SIZE],
-    rnet_u32 *address_out)
+    rnet_u32 *address_out, rnet_u16 *port_out)
 {
     size_t message_len;
     size_t offset;
     rnet_u32 mapped_address = 0;
     rnet_u32 xor_mapped_address = 0;
+    rnet_u16 mapped_port = 0;
+    rnet_u16 xor_mapped_port = 0;
     int have_mapped = 0;
     int have_xor_mapped = 0;
 
@@ -122,28 +124,33 @@ int rnet_stun_parse_binding_response(
             type == RNET_STUN_ATTR_XOR_MAPPED_ADDRESS)
         {
             rnet_u32 address;
+            rnet_u16 port;
             if (value_len != 8U || value[0] != 0U || value[1] != 0x01U)
             {
                 return RNET_STUN_PARSE_ERROR;
             }
+            port = read_be16(value + 2U);
             address = read_be32(value + 4U);
             if (type == RNET_STUN_ATTR_XOR_MAPPED_ADDRESS)
             {
+                port ^= (rnet_u16)(RNET_STUN_MAGIC_COOKIE >> 16);
                 address ^= RNET_STUN_MAGIC_COOKIE;
-                if (!mapped_ipv4_is_valid(address))
+                if (!mapped_ipv4_is_valid(address) || port == 0U)
                 {
                     return RNET_STUN_PARSE_ERROR;
                 }
                 xor_mapped_address = address;
+                xor_mapped_port = port;
                 have_xor_mapped = 1;
             }
             else
             {
-                if (!mapped_ipv4_is_valid(address))
+                if (!mapped_ipv4_is_valid(address) || port == 0U)
                 {
                     return RNET_STUN_PARSE_ERROR;
                 }
                 mapped_address = address;
+                mapped_port = port;
                 have_mapped = 1;
             }
         }
@@ -152,14 +159,28 @@ int rnet_stun_parse_binding_response(
     if (have_xor_mapped)
     {
         *address_out = xor_mapped_address;
+        if (port_out)
+            *port_out = xor_mapped_port;
         return RNET_STUN_PARSE_OK;
     }
     if (have_mapped)
     {
         *address_out = mapped_address;
+        if (port_out)
+            *port_out = mapped_port;
         return RNET_STUN_PARSE_OK;
     }
     return RNET_STUN_PARSE_ERROR;
+}
+
+int rnet_stun_parse_binding_response(
+    const rnet_u8 *packet, size_t packet_len,
+    const rnet_u8 transaction_id[RNET_STUN_TRANSACTION_ID_SIZE],
+    rnet_u32 *address_out)
+{
+    return rnet_stun_parse_binding_response_ex(packet, packet_len,
+                                               transaction_id, address_out,
+                                               NULL);
 }
 
 static int resolve_stun_server(const char *host, unsigned short port,
@@ -241,13 +262,40 @@ void rnet_external_ipv4_config_init(RNetExternalIpv4Config *config)
     config->timeout_ms = RNET_STUN_DEFAULT_TIMEOUT_MS;
 }
 
-int rnet_external_ipv4_discover(const RNetExternalIpv4Config *config,
-                                char *out, size_t out_len)
+static void stun_config_resolve(const RNetExternalIpv4Config *config,
+                                const char **host_out, unsigned short *port_out,
+                                int *timeout_out)
 {
     const char *host = RNET_STUN_DEFAULT_HOST;
     unsigned short port = RNET_STUN_DEFAULT_PORT;
     int timeout_ms = RNET_STUN_DEFAULT_TIMEOUT_MS;
+
+    if (config != NULL)
+    {
+        if (config->stun_host != NULL && config->stun_host[0] != '\0')
+            host = config->stun_host;
+        if (config->stun_port != 0U)
+            port = config->stun_port;
+        if (config->timeout_ms > 0)
+            timeout_ms = config->timeout_ms;
+    }
+    if (timeout_ms > RNET_STUN_MAX_TIMEOUT_MS)
+        timeout_ms = RNET_STUN_MAX_TIMEOUT_MS;
+    *host_out = host;
+    *port_out = port;
+    *timeout_out = timeout_ms;
+}
+
+/* Bind NULL/empty → ephemeral. On success writes address+port (host order). */
+static int stun_binding_discover(const RNetExternalIpv4Config *config,
+                                 const char *bind_hostport, rnet_u32 *address_out,
+                                 rnet_u16 *port_out)
+{
+    const char *host;
+    unsigned short stun_port;
+    int timeout_ms;
     struct sockaddr_in server;
+    struct sockaddr_in bind_addr;
     rnet_socket sock = RNET_SOCKET_INVALID;
     rnet_u8 transaction_id[RNET_STUN_TRANSACTION_ID_SIZE];
     rnet_u8 request[RNET_STUN_HEADER_SIZE];
@@ -258,44 +306,51 @@ int rnet_external_ipv4_discover(const RNetExternalIpv4Config *config,
     int saw_protocol_error = 0;
     int result = RNET_EXTERNAL_IPV4_ERR_TIMEOUT;
 
-    if (out == NULL || out_len == 0U)
-    {
+    if (address_out == NULL || port_out == NULL)
         return RNET_EXTERNAL_IPV4_ERR_ARGUMENT;
-    }
-    out[0] = '\0';
-    if (config != NULL)
-    {
-        if (config->stun_host != NULL && config->stun_host[0] != '\0')
-        {
-            host = config->stun_host;
-        }
-        if (config->stun_port != 0U)
-        {
-            port = config->stun_port;
-        }
-        if (config->timeout_ms > 0)
-        {
-            timeout_ms = config->timeout_ms;
-        }
-    }
-    if (timeout_ms > RNET_STUN_MAX_TIMEOUT_MS)
-    {
-        timeout_ms = RNET_STUN_MAX_TIMEOUT_MS;
-    }
-    if (resolve_stun_server(host, port, &server) != 0)
-    {
+    *address_out = 0;
+    *port_out = 0;
+
+    stun_config_resolve(config, &host, &stun_port, &timeout_ms);
+    if (resolve_stun_server(host, stun_port, &server) != 0)
         return RNET_EXTERNAL_IPV4_ERR_RESOLVE;
-    }
     if (rnet_os_random_bytes(transaction_id, sizeof(transaction_id)) != 0)
-    {
         return RNET_EXTERNAL_IPV4_ERR_RANDOM;
-    }
     build_binding_request(request, transaction_id);
+
     sock = rnet_os_socket_create_dgram();
     if (!rnet_os_socket_valid(sock))
-    {
         return RNET_EXTERNAL_IPV4_ERR_SOCKET;
+    (void)rnet_os_setsockopt_reuseaddr(sock, 1);
+    (void)rnet_os_set_nonblocking(sock);
+
+    memset(&bind_addr, 0, sizeof(bind_addr));
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    bind_addr.sin_port = 0;
+    if (bind_hostport && bind_hostport[0])
+    {
+        char bh[128];
+        rnet_u16 bp = 0;
+        if (rnet_os_parse_hostport(bind_hostport, bh, sizeof(bh), &bp) != 0 ||
+            bp == 0)
+        {
+            rnet_os_socket_destroy(&sock);
+            return RNET_EXTERNAL_IPV4_ERR_ARGUMENT;
+        }
+        if (rnet_os_resolve_sockaddr(bh[0] ? bh : "0.0.0.0", bp, &bind_addr) !=
+            0)
+        {
+            rnet_os_socket_destroy(&sock);
+            return RNET_EXTERNAL_IPV4_ERR_RESOLVE;
+        }
     }
+    if (rnet_os_bind(sock, &bind_addr) != 0)
+    {
+        rnet_os_socket_destroy(&sock);
+        return RNET_EXTERNAL_IPV4_ERR_BIND;
+    }
+
     start_ms = rnet_os_monotonic_ms();
     for (;;)
     {
@@ -305,9 +360,7 @@ int rnet_external_ipv4_discover(const RNetExternalIpv4Config *config,
 
         now_ms = rnet_os_monotonic_ms();
         if (now_ms - start_ms >= (rnet_u64)timeout_ms)
-        {
             break;
-        }
         if (rnet_os_sendto(sock, request, sizeof(request), &server) < 0)
         {
             result = RNET_EXTERNAL_IPV4_ERR_SOCKET;
@@ -320,7 +373,8 @@ int rnet_external_ipv4_discover(const RNetExternalIpv4Config *config,
             struct sockaddr_in source;
             int would_block = 0;
             int received;
-            rnet_u32 address;
+            rnet_u32 address = 0;
+            rnet_u16 mapped_port = 0;
             int parsed;
 
             readable = rnet_os_poll_recv(sock, wait_ms);
@@ -330,68 +384,96 @@ int rnet_external_ipv4_discover(const RNetExternalIpv4Config *config,
                 goto done;
             }
             if (readable == 0)
-            {
                 break;
-            }
             memset(&source, 0, sizeof(source));
             received = rnet_os_recvfrom(sock, response, sizeof(response),
                                         &source, &would_block);
             if (received < 0)
             {
                 if (would_block)
-                {
                     break;
-                }
                 result = RNET_EXTERNAL_IPV4_ERR_SOCKET;
                 goto done;
             }
             if (!sockaddr_ipv4_equal(&source, &server))
-            {
                 continue;
-            }
-            parsed = rnet_stun_parse_binding_response(
-                response, (size_t)received, transaction_id, &address);
+            parsed = rnet_stun_parse_binding_response_ex(
+                response, (size_t)received, transaction_id, &address,
+                &mapped_port);
             if (parsed == RNET_STUN_PARSE_OK)
             {
-                char text[RNET_IPV4_ADDRESS_TEXT_MAX];
-                size_t text_len;
-                format_ipv4(address, text);
-                text_len = strlen(text);
-                if (text_len + 1U > out_len)
-                {
-                    result = RNET_EXTERNAL_IPV4_ERR_ARGUMENT;
-                    goto done;
-                }
-                memcpy(out, text, text_len + 1U);
+                *address_out = address;
+                *port_out = mapped_port;
                 result = RNET_EXTERNAL_IPV4_OK;
                 goto done;
             }
             if (parsed == RNET_STUN_PARSE_ERROR)
-            {
                 saw_protocol_error = 1;
-            }
             now_ms = rnet_os_monotonic_ms();
             if (now_ms - start_ms >= (rnet_u64)timeout_ms)
-            {
                 goto done;
-            }
             remaining_ms = timeout_ms - (int)(now_ms - start_ms);
             wait_ms = rto_ms < remaining_ms ? rto_ms : remaining_ms;
         }
         if (rto_ms < timeout_ms / 2)
-        {
             rto_ms *= 2;
-        }
         else
-        {
             rto_ms = timeout_ms;
-        }
     }
 done:
     rnet_os_socket_destroy(&sock);
     if (result == RNET_EXTERNAL_IPV4_ERR_TIMEOUT && saw_protocol_error)
-    {
         return RNET_EXTERNAL_IPV4_ERR_PROTOCOL;
-    }
     return result;
+}
+
+int rnet_external_ipv4_discover(const RNetExternalIpv4Config *config,
+                                char *out, size_t out_len)
+{
+    rnet_u32 address = 0;
+    rnet_u16 port = 0;
+    char text[RNET_IPV4_ADDRESS_TEXT_MAX];
+    size_t text_len;
+    int result;
+
+    if (out == NULL || out_len == 0U)
+        return RNET_EXTERNAL_IPV4_ERR_ARGUMENT;
+    out[0] = '\0';
+    result = stun_binding_discover(config, NULL, &address, &port);
+    if (result != RNET_EXTERNAL_IPV4_OK)
+        return result;
+    format_ipv4(address, text);
+    text_len = strlen(text);
+    if (text_len + 1U > out_len)
+        return RNET_EXTERNAL_IPV4_ERR_ARGUMENT;
+    memcpy(out, text, text_len + 1U);
+    return RNET_EXTERNAL_IPV4_OK;
+}
+
+int rnet_external_udp_endpoint_discover(const RNetExternalIpv4Config *config,
+                                        const char *bind_hostport,
+                                        char *out_endpoint,
+                                        size_t out_endpoint_len)
+{
+    rnet_u32 address = 0;
+    rnet_u16 port = 0;
+    char text[RNET_IPV4_ADDRESS_TEXT_MAX];
+    int n;
+    int result;
+
+    if (out_endpoint == NULL || out_endpoint_len == 0U || !bind_hostport ||
+        !bind_hostport[0])
+        return RNET_EXTERNAL_IPV4_ERR_ARGUMENT;
+    out_endpoint[0] = '\0';
+    result = stun_binding_discover(config, bind_hostport, &address, &port);
+    if (result != RNET_EXTERNAL_IPV4_OK)
+        return result;
+    format_ipv4(address, text);
+    n = snprintf(out_endpoint, out_endpoint_len, "%s:%u", text, (unsigned)port);
+    if (n < 0 || (size_t)n >= out_endpoint_len)
+    {
+        out_endpoint[0] = '\0';
+        return RNET_EXTERNAL_IPV4_ERR_ARGUMENT;
+    }
+    return RNET_EXTERNAL_IPV4_OK;
 }

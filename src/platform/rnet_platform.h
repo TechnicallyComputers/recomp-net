@@ -31,6 +31,7 @@ int rnet_os_socket_valid(rnet_socket s);
 rnet_socket rnet_os_socket_create_dgram(void);
 void rnet_os_socket_destroy(rnet_socket *sock_ptr);
 int rnet_os_setsockopt_reuseaddr(rnet_socket s, int reuse_bool);
+int rnet_os_setsockopt_broadcast(rnet_socket s, int broadcast_bool);
 int rnet_os_setsockopt_recvbuf(rnet_socket s, int bytes);
 int rnet_os_bind(rnet_socket s, const struct sockaddr_in *addr);
 int rnet_os_set_nonblocking(rnet_socket s);

@@ -74,7 +74,7 @@ static int send_text(rnet_socket sock, const struct sockaddr_in *dst,
     n = strlen(text);
     if (n == 0 || n > RNET_DJ_MAX_PKT)
         return RNET_LAN_DIRECT_ERR_IO;
-    if (rnet_os_sendto(sock, text, n, dst) != 0)
+    if (rnet_os_sendto(sock, text, n, dst) < 0)
         return RNET_LAN_DIRECT_ERR_IO;
     return RNET_LAN_DIRECT_OK;
 }

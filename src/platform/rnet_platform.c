@@ -66,6 +66,12 @@ int rnet_os_setsockopt_reuseaddr(rnet_socket s, int reuse_bool)
     return setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char *)&v, (int)sizeof(v));
 }
 
+int rnet_os_setsockopt_broadcast(rnet_socket s, int broadcast_bool)
+{
+    int v = broadcast_bool ? 1 : 0;
+    return setsockopt(s, SOL_SOCKET, SO_BROADCAST, (const char *)&v, (int)sizeof(v));
+}
+
 int rnet_os_setsockopt_recvbuf(rnet_socket s, int bytes)
 {
     return setsockopt(s, SOL_SOCKET, SO_RCVBUF, (const char *)&bytes, (int)sizeof(bytes));
@@ -257,6 +263,12 @@ int rnet_os_setsockopt_reuseaddr(rnet_socket s, int reuse_bool)
 {
     int v = reuse_bool;
     return setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &v, (socklen_t)sizeof(v));
+}
+
+int rnet_os_setsockopt_broadcast(rnet_socket s, int broadcast_bool)
+{
+    int v = broadcast_bool ? 1 : 0;
+    return setsockopt(s, SOL_SOCKET, SO_BROADCAST, &v, (socklen_t)sizeof(v));
 }
 
 int rnet_os_setsockopt_recvbuf(rnet_socket s, int bytes)

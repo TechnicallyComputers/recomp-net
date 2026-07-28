@@ -108,7 +108,8 @@ int rnet_proto_encode_start(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 s
 }
 
 int rnet_proto_encode_input(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
-                            rnet_u32 ack_tick, const RNetWireFrame *frames, int frame_count)
+                            rnet_u16 input_epoch, rnet_u32 ack_tick, const RNetWireFrame *frames,
+                            int frame_count)
 {
     rnet_u8 *c = out;
     int i;
@@ -125,8 +126,8 @@ int rnet_proto_encode_input(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 s
     write_u32(&c, session_id);
     *c++ = local_slot;
     *c++ = (rnet_u8)frame_count;
-    *c++ = 0;
-    *c++ = 0;
+    *c++ = (rnet_u8)(input_epoch & 0xFFu);
+    *c++ = (rnet_u8)((input_epoch >> 8) & 0xFFu);
     write_u32(&c, ack_tick);
     for (i = 0; i < frame_count; ++i)
     {
@@ -170,7 +171,7 @@ int rnet_proto_encode_delay_sync(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_
 }
 
 int rnet_proto_encode_input_confirm(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
-                                    rnet_u32 sim_tick, rnet_u32 input_hash)
+                                    rnet_u16 input_epoch, rnet_u32 sim_tick, rnet_u32 input_hash)
 {
     rnet_u8 *c = out;
     if (cap < 28)
@@ -181,8 +182,8 @@ int rnet_proto_encode_input_confirm(rnet_u8 *out, size_t cap, rnet_u32 magic, rn
     write_u16(&c, RNET_PKT_INPUT_CONFIRM);
     write_u32(&c, session_id);
     *c++ = local_slot;
-    *c++ = 0;
-    *c++ = 0;
+    *c++ = (rnet_u8)(input_epoch & 0xFFu);
+    *c++ = (rnet_u8)((input_epoch >> 8) & 0xFFu);
     *c++ = 0;
     write_u32(&c, sim_tick);
     write_u32(&c, input_hash);
@@ -388,7 +389,8 @@ int rnet_proto_decode(const rnet_u8 *data, size_t len, rnet_u32 expect_magic, RN
         }
         out->local_slot = *c++;
         out->frame_count = (int)(*c++);
-        c += 2;
+        out->input_epoch = (rnet_u16)(*c++);
+        out->input_epoch |= (rnet_u16)((rnet_u16)(*c++) << 8);
         out->ack_tick = read_u32(&c);
         if (out->frame_count < 1 || out->frame_count > RNET_MAX_BUNDLE)
         {
@@ -430,7 +432,9 @@ int rnet_proto_decode(const rnet_u8 *data, size_t len, rnet_u32 expect_magic, RN
             return -1;
         }
         out->local_slot = *c++;
-        c += 3;
+        out->input_epoch = (rnet_u16)(*c++);
+        out->input_epoch |= (rnet_u16)((rnet_u16)(*c++) << 8);
+        c += 1;
         out->confirm_sim_tick = read_u32(&c);
         out->confirm_hash = read_u32(&c);
         break;

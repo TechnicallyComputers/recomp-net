@@ -86,6 +86,8 @@ struct RNetSession
     rnet_u64 state_last_tx_ms;
     rnet_u64 state_last_ack_ms;
     rnet_u64 state_last_begin_ms;
+    rnet_u64 state_last_progress_log_ms;
+    rnet_u32 state_last_progress_acked;
     /* Hash probe before transfer (host announce → guest reply). */
     int state_probe_active;
     int state_probe_sender;
@@ -101,6 +103,9 @@ struct RNetSession
      * so pre-resync tip rows cannot clobber the post-hard_resync epoch
      * (tick % RNET_HISTORY_LENGTH collisions). Cleared by prime_delay_inputs. */
     int input_send_suppress;
+    /* Bumped on hard_resync. INPUT/CONFIRM carry this; other-epoch packets are
+     * dropped so in-flight tips from a prior sim_tick=0 era cannot first-wins. */
+    rnet_u16 input_epoch;
     /* Diagnostics (JSONL / HUD). */
     RNetAdmitStall last_stall;
     rnet_u32 consecutive_stalls;
@@ -300,7 +305,7 @@ static void send_input_confirm_tick(RNetSession *s, rnet_u32 tick,
 
     if (s == NULL) return;
     len = rnet_proto_encode_input_confirm(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id, s->cfg.local_slot,
-                                          tick, hash);
+                                          s->input_epoch, tick, hash);
     send_raw(s, buf, len);
     now = session_now(s);
     s->confirm_last_sent_ms[tick % RNET_HISTORY_LENGTH] = now;
@@ -373,6 +378,11 @@ static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
         }
         break;
     case RNET_PKT_INPUT:
+        /* Drop prior-epoch tips (rapid rematch hard_resync → sim=0). */
+        if (pkt->input_epoch != s->input_epoch)
+        {
+            break;
+        }
         for (i = 0; i < pkt->frame_count; ++i)
         {
             store_remote_frame(s, pkt->local_slot, &pkt->frames[i]);
@@ -390,6 +400,10 @@ static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
         }
         break;
     case RNET_PKT_INPUT_CONFIRM:
+        if (pkt->input_epoch != s->input_epoch)
+        {
+            break;
+        }
         if (pkt->local_slot < s->cfg.slot_count)
         {
             rnet_u32 index = pkt->confirm_sim_tick % RNET_HISTORY_LENGTH;
@@ -513,6 +527,8 @@ static void state_clear(RNetSession *s)
     s->state_last_tx_ms = 0;
     s->state_last_ack_ms = 0;
     s->state_last_begin_ms = 0;
+    s->state_last_progress_log_ms = 0;
+    s->state_last_progress_acked = 0;
 }
 
 static void state_rx_set_chunk(RNetSession *s, rnet_u32 chunk_index)
@@ -599,7 +615,14 @@ static void state_drive_sender(RNetSession *s)
     int n;
     rnet_u64 now;
     rnet_u32 window_end;
-    enum { kWindow = 48u * 1024u };
+    rnet_u32 sent_this_pump = 0;
+    /* LAN can blast a wide window; ICE/TURN drops when we flood juice_send.
+     * Keep a small in-flight window and cap chunks per pump so ACKs keep up. */
+    const int is_ice = (s->transport.mode == RNET_TRANSPORT_ICE);
+    const rnet_u32 kWindow = is_ice ? (8u * 1024u) : (48u * 1024u);
+    const rnet_u32 kMaxChunksPerPump = is_ice ? 4u : 64u;
+    const rnet_u64 kAckTimeoutMs = is_ice ? 150ULL : 50ULL;
+    const rnet_u64 kBeginRetransmitMs = is_ice ? 80ULL : 40ULL;
 
     if (!s->state_active || !s->state_sender || s->state_ready || s->state_buf == NULL)
     {
@@ -607,7 +630,8 @@ static void state_drive_sender(RNetSession *s)
     }
     now = session_now(s);
     /* Retransmit BEGIN until the peer has ACKed past 0 (saw BEGIN). */
-    if (s->state_peer_ack == 0 && (s->state_last_begin_ms == 0 || now - s->state_last_begin_ms >= 40ULL))
+    if (s->state_peer_ack == 0 &&
+        (s->state_last_begin_ms == 0 || now - s->state_last_begin_ms >= kBeginRetransmitMs))
     {
         n = rnet_proto_encode_state_begin(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id, s->cfg.local_slot,
                                           s->state_op, s->state_slot, s->state_xfer_id, s->state_total, s->state_crc);
@@ -625,7 +649,7 @@ static void state_drive_sender(RNetSession *s)
     }
 
     /* On ACK timeout, rewind send cursor to peer_ack for retransmission. */
-    if (s->state_last_ack_ms != 0 && now - s->state_last_ack_ms >= 50ULL)
+    if (s->state_last_ack_ms != 0 && now - s->state_last_ack_ms >= kAckTimeoutMs)
     {
         s->state_send_cursor = s->state_peer_ack;
         s->state_last_ack_ms = now; /* avoid spinning every pump */
@@ -641,7 +665,7 @@ static void state_drive_sender(RNetSession *s)
         window_end = s->state_total;
     }
 
-    while (s->state_send_cursor < window_end)
+    while (s->state_send_cursor < window_end && sent_this_pump < kMaxChunksPerPump)
     {
         rnet_u32 off = s->state_send_cursor;
         rnet_u32 left = s->state_total - off;
@@ -654,8 +678,22 @@ static void state_drive_sender(RNetSession *s)
         }
         send_raw(s, buf, n);
         s->state_send_cursor += chunk;
+        sent_this_pump++;
     }
     s->state_last_tx_ms = now;
+
+    /* Progress log every ~500ms (or on first ACK) — useful on slow TURN paths. */
+    if (s->state_peer_ack != s->state_last_progress_acked || s->state_last_progress_log_ms == 0 ||
+        now - s->state_last_progress_log_ms >= 500ULL)
+    {
+        fprintf(stderr,
+                "rnet_state: xfer_id=%u op=%u %u/%u acked%s\n",
+                (unsigned)s->state_xfer_id, (unsigned)s->state_op, (unsigned)s->state_peer_ack,
+                (unsigned)s->state_total, is_ice ? " (ice)" : "");
+        s->state_last_progress_log_ms = now;
+        s->state_last_progress_acked = s->state_peer_ack;
+    }
+
     state_mark_ready_if_complete(s);
 }
 
@@ -978,7 +1016,7 @@ static void send_input_bundle(RNetSession *s)
             continue;
         }
         len = rnet_proto_encode_input(buf, sizeof(buf), s->cfg.protocol_magic,
-                                      s->cfg.session_id, s->cfg.local_slot, ack,
+                                      s->cfg.session_id, s->cfg.local_slot, s->input_epoch, ack,
                                       frames, count);
         if (len < 0)
         {
@@ -1108,6 +1146,48 @@ static int wire_confirmations_agree(RNetSession *s, rnet_u32 wire)
     return 1;
 }
 
+/* Retransmit confirms for [play - trail, tip], not only [play, tip].
+ * Otherwise a lost INPUT_CONFIRM for an already-admitted tick leaves the
+ * slower peer in wait_confirm forever while the faster peer runs ahead
+ * (spam rematch over ICE: guest@19 wait_confirm, host@26 wait_remote).
+ * Prefer the cached published hash so trailing ticks still retransmit after
+ * rings have advanced past the original inputs. */
+static void refresh_confirm_window(RNetSession *s, rnet_u32 play_wire, rnet_u32 sample_wire)
+{
+    rnet_u32 trail;
+    rnet_u32 lo;
+    rnet_u32 w;
+    rnet_u64 now;
+
+    if (s == NULL)
+        return;
+    trail = (rnet_u32)s->delay + (rnet_u32)s->cfg.bundle_redundancy + 8u;
+    if (trail < 16u)
+        trail = 16u;
+    if (trail > (rnet_u32)RNET_HISTORY_LENGTH / 2u)
+        trail = (rnet_u32)RNET_HISTORY_LENGTH / 2u;
+    lo = (play_wire > trail) ? (play_wire - trail) : 0u;
+    if (sample_wire < lo)
+        sample_wire = lo;
+    now = session_now(s);
+    for (w = lo; w <= sample_wire; ++w)
+    {
+        rnet_u32 index = w % RNET_HISTORY_LENGTH;
+        if (s->published_valid[index] && s->published_tick[index] == w)
+        {
+            if (s->confirm_last_sent_ms[index] == 0 ||
+                now - s->confirm_last_sent_ms[index] >= 4ULL)
+                send_input_confirm_tick(s, w, s->published_hash[index]);
+        }
+        else
+        {
+            (void)prepare_wire_confirm(s, w, 0);
+        }
+        if (w == 0xffffffffu)
+            break;
+    }
+}
+
 RNetSession *rnet_session_create(const RNetConfig *cfg, const RNetHostVTable *host)
 {
     RNetSession *s;
@@ -1230,15 +1310,26 @@ int rnet_session_start_ice(RNetSession *s, const RNetIceConfig *ice)
 
 #if defined(RNET_ENABLE_ICE)
 /* After STUN/host ICE fails or stalls, one automatic gather with force_relay
- * when TURN credentials are present. Opt out: RNET_ICE_NO_RELAY_FALLBACK=1. */
+ * when TURN credentials are present. Opt out: RNET_ICE_NO_RELAY_FALLBACK=1.
+ *
+ * Timers (env overrides):
+ *   RNET_ICE_RELAY_FALLBACK_MS — general stall (default 5000, was 12000)
+ *   RNET_ICE_RELAY_PRIVATE_MS  — early fallback when every remote so far is
+ *                                RFC1918 (default 2500); host/STUN cannot
+ *                                reach CGNAT LAN candidates
+ *   RNET_ICE_RELAY_DEAD_MS     — completed non-relay but no session RX
+ */
 static void session_maybe_ice_relay_fallback(RNetSession *s)
 {
     RNetIceState st;
     rnet_u64 now;
-    rnet_u64 stuck_ms = 12000ULL;
+    rnet_u64 elapsed;
+    rnet_u64 stuck_ms = 5000ULL;
+    rnet_u64 private_ms = 2500ULL;
     rnet_u64 dead_ms = 6000ULL;
     const char *env;
     char path[32];
+    int only_private;
 
     if (s == NULL || s->ice == NULL || s->phase == RNET_PHASE_RUNNING)
         return;
@@ -1253,8 +1344,15 @@ static void session_maybe_ice_relay_fallback(RNetSession *s)
     if (env != NULL && env[0] != '\0')
     {
         long v = strtol(env, NULL, 10);
-        if (v >= 3000L && v <= 60000L)
+        if (v >= 2000L && v <= 60000L)
             stuck_ms = (rnet_u64)v;
+    }
+    env = getenv("RNET_ICE_RELAY_PRIVATE_MS");
+    if (env != NULL && env[0] != '\0')
+    {
+        long v = strtol(env, NULL, 10);
+        if (v >= 1000L && v <= 30000L)
+            private_ms = (rnet_u64)v;
     }
     env = getenv("RNET_ICE_RELAY_DEAD_MS");
     if (env != NULL && env[0] != '\0')
@@ -1263,14 +1361,25 @@ static void session_maybe_ice_relay_fallback(RNetSession *s)
         if (v >= 2000L && v <= 30000L)
             dead_ms = (rnet_u64)v;
     }
+    if (private_ms > stuck_ms)
+        private_ms = stuck_ms;
 
     now = session_now(s);
+    elapsed = (s->ice_attempt_ms != 0ULL && now >= s->ice_attempt_ms)
+                  ? (now - s->ice_attempt_ms)
+                  : 0ULL;
     st = rnet_ice_agent_state(s->ice);
+    only_private = rnet_ice_agent_remote_only_private(s->ice);
+
     if (st == RNET_ICE_STATE_FAILED)
         goto do_fallback;
     if (st != RNET_ICE_STATE_CONNECTED && st != RNET_ICE_STATE_COMPLETED)
     {
-        if (s->ice_attempt_ms != 0ULL && now - s->ice_attempt_ms >= stuck_ms)
+        /* CGNAT / internet: only private host remotes will never connect via
+         * host/STUN — cut over to force_relay without waiting the full stall. */
+        if (only_private && elapsed >= private_ms)
+            goto do_fallback;
+        if (elapsed >= stuck_ms)
             goto do_fallback;
         return;
     }
@@ -1286,6 +1395,21 @@ static void session_maybe_ice_relay_fallback(RNetSession *s)
     return;
 
 do_fallback:
+    if (only_private)
+    {
+        fprintf(stderr,
+                "rnet_ice: TURN fallback with RFC1918-only remotes so far — "
+                "restarting force_relay so both sides can gather typ relay "
+                "(early=%llums stall=%llums)\n",
+                (unsigned long long)private_ms, (unsigned long long)stuck_ms);
+    }
+    else
+    {
+        fprintf(stderr,
+                "rnet_ice: TURN fallback after host/STUN stall (%llums) — "
+                "restarting force_relay\n",
+                (unsigned long long)stuck_ms);
+    }
     if (rnet_ice_agent_restart_force_relay(s->ice) != 0)
         return;
     s->transport.ice_ctx = s->ice;
@@ -1372,7 +1496,6 @@ int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick)
     RNetInputSample local_future;
     rnet_u32 play_wire;
     rnet_u32 sample_wire;
-    rnet_u32 confirm_wire;
     rnet_u32 hash;
     rnet_u8 slot;
 
@@ -1418,11 +1541,7 @@ int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick)
     }
 
     send_input_bundle(s);
-    for (confirm_wire = play_wire; confirm_wire <= sample_wire; ++confirm_wire)
-    {
-        (void)prepare_wire_confirm(s, confirm_wire, 0);
-        if (confirm_wire == 0xffffffffu) break;
-    }
+    refresh_confirm_window(s, play_wire, sample_wire);
 
     if (!rnet_ring_get(&s->local_ring, play_wire, &local_play))
     {
@@ -1730,6 +1849,12 @@ void rnet_session_get_stats(const RNetSession *s, RNetSessionStats *out)
     out->state_busy = (s->state_active || s->state_probe_active) ? 1 : 0;
     out->state_op = s->state_active ? s->state_op
                     : (s->state_probe_active ? s->state_probe_op : 0);
+    out->state_sender = s->state_active ? s->state_sender : 0;
+    out->state_bytes_total = s->state_active ? s->state_total : 0;
+    if (s->state_active)
+        out->state_bytes_acked = s->state_sender ? s->state_peer_ack : s->state_contiguity;
+    else
+        out->state_bytes_acked = 0;
     out->packets_rx = s->packets_rx;
     out->input_bundle_sends = s->input_bundle_sends;
 
@@ -1803,15 +1928,12 @@ int rnet_session_state_probe(RNetSession *s, rnet_u8 op, rnet_u8 slot, rnet_u32 
     s->state_probe_size = total_size;
     s->state_probe_crc = payload_crc;
     s->state_probe_last_tx_ms = 0;
-    /* SAVE coord (size==0): keep sim running so deferred savestate_poll can run.
-     * LOAD size==0: post-load ready rendezvous — host stalls until guest ACKs.
+    /* size==0 probes must not stall INPUT: SAVE coord and LOAD ready both need
+     * the slower peer to keep admitting for savestate_poll. App-layer LOAD_READY
+     * freezes sim until mutual ready + hard_resync; stalling send_input_bundle
+     * here starves the late applier's tip runway (spam-load hang).
      * Hash probe (size!=0): stall until agree or transfer. */
-    if (total_size != 0)
-        s->state_stall_sim = 1;
-    else if (op == RNET_STATE_OP_LOAD)
-        s->state_stall_sim = 1;
-    else
-        s->state_stall_sim = 0;
+    s->state_stall_sim = (total_size != 0) ? 1 : 0;
     state_drive_probe(s);
     return 0;
 }
@@ -1947,6 +2069,8 @@ int rnet_session_state_begin(RNetSession *s, rnet_u8 op, rnet_u8 slot, const voi
     s->state_last_tx_ms = 0;
     s->state_last_ack_ms = 0;
     s->state_last_begin_ms = 0;
+    s->state_last_progress_log_ms = 0;
+    s->state_last_progress_acked = 0;
 
     n = rnet_proto_encode_state_begin(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id, s->cfg.local_slot,
                                       s->state_op, s->state_slot, s->state_xfer_id, s->state_total, s->state_crc);
@@ -2028,6 +2152,9 @@ void rnet_session_hard_resync(RNetSession *s)
     s->last_input_tip_valid = 0;
     /* Peers may have applied a load on different sim ticks; restart together. */
     s->sim_tick = 0;
+    /* Invalidate in-flight INPUT/CONFIRM from the previous era (same low ticks
+     * would otherwise first-wins into this window — spam rematch + stick mash). */
+    s->input_epoch = (rnet_u16)(s->input_epoch + 1u);
     /* Keep suppress until prime_delay_inputs — avoids emitting an empty tip. */
     s->input_send_suppress = 1;
 }

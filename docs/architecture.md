@@ -45,10 +45,16 @@ There is no prediction window in v1.
   to the ICE agent; session stays `IDLE` until ICE reaches `COMPLETED`, then
   enters `LINKING` and runs the same bootstrap/admission path over ICE
 - With TURN credentials and without `force_relay`, `rnet_session_pump` may
-  restart ICE once with relay-only candidates on `FAILED`, gather stall
-  (~12s), or completed non-relay with no session packets (~6s). Opt out:
-  `RNET_ICE_NO_RELAY_FALLBACK=1`
-  datagrams.
+  restart ICE once with relay-only candidates on `FAILED`, general stall
+  (default 5s, `RNET_ICE_RELAY_FALLBACK_MS`), early when remotes stay
+  RFC1918-only (default 2.5s, `RNET_ICE_RELAY_PRIVATE_MS`), or completed
+  non-relay with no session packets (~6s, `RNET_ICE_RELAY_DEAD_MS`). Opt out:
+  `RNET_ICE_NO_RELAY_FALLBACK=1`.
+- `force_relay` / Force TURN strips non-relay lines from local/remote SDP and
+  trickle, skips STUN, and gates `juice_send` until CONNECTED/COMPLETED.
+  libjuice still gathers local host (no transport-policy API), so a
+  host↔relay pair can still win on LAN; host↔prflx should not when remotes
+  are stripped.
 
 ## Host-as-relay (LAN hub)
 

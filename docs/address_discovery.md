@@ -67,3 +67,26 @@ forwarded and reachable. ICE or explicit router configuration is still needed
 for general Internet traversal. Never bind a local socket to the discovered
 public/NAT address: bind `0.0.0.0:port` and advertise `external_ip:port` as two
 separate endpoint values.
+
+## Lobby advertise endpoint (bind + mapped port)
+
+Online lobby hosts should discover a server-reflexive **UDP** endpoint from the
+same local game port they answer list/waiting-room RTT on:
+
+```c
+RNetExternalIpv4Config stun;
+char advertise[RNET_ENDPOINT_TEXT_MAX];
+rnet_external_ipv4_config_init(&stun);
+/* Prefer the lobby Coturn STUN when turn credentials are available. */
+if (rnet_external_udp_endpoint_discover(&stun, "0.0.0.0:7777", advertise,
+                                        sizeof(advertise)) ==
+    RNET_EXTERNAL_IPV4_OK) {
+    /* Publish advertise via WS set_host_endpoint for list RTT probes. */
+}
+```
+
+This binds `bind_hostport`, so close any other owner of that port (e.g. the
+waiting-room RTT probe) for the duration of the call. The result includes the
+NAT **mapped port**, which may differ from the local bind port. List latency
+remains best-effort; symmetric NAT and hairpin failures still show as unknown
+until post-join ICE.
