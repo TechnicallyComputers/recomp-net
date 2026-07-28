@@ -71,6 +71,8 @@ struct RNetIceAgent
     int selected_logged;
     int force_relay; /* runtime cfg->force_relay and/or RNET_ICE_FORCE_TURN */
     int relay_fallback_done; /* auto-retried with force_relay once */
+    unsigned remote_cand_count; /* trickle remotes seen this gather */
+    unsigned remote_public_cand_count; /* remotes with non-private IPv4 */
 };
 
 static RNetIceState map_juice_state(juice_state_t st)
@@ -125,12 +127,34 @@ static void queue_cand(RNetIceAgent *a, const char *sdp)
     a->cand_count++;
 }
 
+static int ice_candidate_is_relay(const char *sdp)
+{
+    return sdp != NULL && strstr(sdp, " typ relay") != NULL;
+}
+
+static const char *ice_candidate_type(const char *sdp)
+{
+    if (sdp == NULL || sdp[0] == '\0')
+        return "unknown";
+    if (strstr(sdp, " typ relay") != NULL)
+        return "relay";
+    if (strstr(sdp, " typ srflx") != NULL)
+        return "srflx";
+    if (strstr(sdp, " typ prflx") != NULL)
+        return "prflx";
+    if (strstr(sdp, " typ host") != NULL)
+        return "host";
+    return "unknown";
+}
+
 static void log_selected_pair(RNetIceAgent *a)
 {
     char local_cand[512];
     char remote_cand[512];
     char local_addr[256];
     char remote_addr[256];
+    const char *local_ty;
+    const char *remote_ty;
     if (a == NULL || a->agent == NULL || a->selected_logged)
         return;
     local_cand[0] = remote_cand[0] = local_addr[0] = remote_addr[0] = '\0';
@@ -141,6 +165,17 @@ static void log_selected_pair(RNetIceAgent *a)
                 local_cand[0] ? local_cand : "(none)",
                 remote_cand[0] ? remote_cand : "(none)");
         a->selected_logged = 1;
+        if (a->force_relay) {
+            local_ty = ice_candidate_type(local_cand);
+            remote_ty = ice_candidate_type(remote_cand);
+            if (strcmp(local_ty, "relay") != 0 || strcmp(remote_ty, "relay") != 0) {
+                fprintf(stderr,
+                        "rnet_ice: force_relay but pair is local=%s remote=%s "
+                        "(libjuice still gathers local host; non-relay was "
+                        "stripped from signaled SDP/trickle)\n",
+                        local_ty, remote_ty);
+            }
+        }
     }
     if (juice_get_selected_addresses(a->agent, local_addr, sizeof(local_addr),
                                      remote_addr, sizeof(remote_addr)) == 0) {
@@ -165,24 +200,61 @@ static void on_state_changed(juice_agent_t *agent, juice_state_t state, void *us
         fprintf(stderr, "rnet_ice: state=FAILED (check STUN/TURN / NAT path)\n");
 }
 
-static int ice_candidate_is_relay(const char *sdp)
+static int ice_line_is_candidate(const char *line)
 {
-    return sdp != NULL && strstr(sdp, " typ relay") != NULL;
+    const char *p = line;
+    if (p == NULL)
+        return 0;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (strncmp(p, "a=candidate:", 12) == 0)
+        return 1;
+    if (strncmp(p, "candidate:", 10) == 0)
+        return 1;
+    return 0;
 }
 
-static const char *ice_candidate_type(const char *sdp)
+/* Keep ice-ufrag/pwd/etc.; drop host/srflx/prflx candidate lines. */
+static int ice_sdp_strip_non_relay(const char *in, char *out, size_t out_len)
 {
-    if (sdp == NULL || sdp[0] == '\0')
-        return "unknown";
-    if (strstr(sdp, " typ relay") != NULL)
-        return "relay";
-    if (strstr(sdp, " typ srflx") != NULL)
-        return "srflx";
-    if (strstr(sdp, " typ prflx") != NULL)
-        return "prflx";
-    if (strstr(sdp, " typ host") != NULL)
-        return "host";
-    return "unknown";
+    const char *p;
+    size_t o = 0;
+
+    if (out == NULL || out_len == 0)
+        return -1;
+    out[0] = '\0';
+    if (in == NULL)
+        return 0;
+
+    p = in;
+    while (*p)
+    {
+        const char *eol = p;
+        size_t n;
+        int keep;
+
+        while (*eol && *eol != '\n' && *eol != '\r')
+            eol++;
+        n = (size_t)(eol - p);
+        keep = 1;
+        if (n > 0 && ice_line_is_candidate(p))
+            keep = ice_candidate_is_relay(p);
+        if (keep)
+        {
+            if (o + n + 2 >= out_len)
+                return -1;
+            memcpy(out + o, p, n);
+            o += n;
+            out[o++] = '\n';
+            out[o] = '\0';
+        }
+        p = eol;
+        if (*p == '\r')
+            p++;
+        if (*p == '\n')
+            p++;
+    }
+    return 0;
 }
 
 void rnet_ice_agent_selected_info(const RNetIceAgent *agent, char *path_out, size_t path_len,
@@ -296,6 +368,8 @@ static void ice_reset_runtime(RNetIceAgent *a)
     a->gather_started = 0;
     a->gather_pending = 0;
     a->selected_logged = 0;
+    a->remote_cand_count = 0;
+    a->remote_public_cand_count = 0;
     a->state = RNET_ICE_STATE_IDLE;
 }
 
@@ -304,7 +378,8 @@ static int ice_create_juice(RNetIceAgent *a)
     juice_config_t jcfg;
 
     memset(&jcfg, 0, sizeof(jcfg));
-    if (a->stun_host[0] != '\0')
+    /* force_relay: skip STUN so we do not gather srflx (host still gathered). */
+    if (a->stun_host[0] != '\0' && !a->force_relay)
     {
         jcfg.stun_server_host = a->stun_host;
         jcfg.stun_server_port = a->stun_port ? a->stun_port : 3478;
@@ -395,16 +470,110 @@ RNetIceAgent *rnet_ice_agent_create(const RNetIceConfig *cfg, RNetIceSignalEmitF
         else
         {
             fprintf(stderr,
-                    "rnet_ice: force_relay — only typ relay candidates will be "
-                    "used\n");
+                    "rnet_ice: force_relay — strip non-relay from SDP/trickle "
+                    "(no STUN/srflx; libjuice may still gather local host)\n");
         }
     }
     return a;
 }
 
+/* True for IPv4 in RFC1918 / link-local / loopback. Public coturn with
+ * denied-peer-ip rejects CreatePermission into these ranges (libjuice:
+ * "CreatePermission error … code=403"). */
+static int ice_ipv4_is_private(const char *ip)
+{
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (ip == NULL || ip[0] == '\0')
+        return 0;
+    if (sscanf(ip, "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
+        return 0;
+    if (a > 255U || b > 255U || c > 255U || d > 255U)
+        return 0;
+    if (a == 10U)
+        return 1;
+    if (a == 127U)
+        return 1;
+    if (a == 169U && b == 254U)
+        return 1;
+    if (a == 172U && b >= 16U && b <= 31U)
+        return 1;
+    if (a == 192U && b == 168U)
+        return 1;
+    return 0;
+}
+
+/* ADDRESS field of an ICE candidate line:
+ * [a=]candidate:<foundation> <component> <proto> <priority> <address> <port> … */
+static int ice_sdp_candidate_ipv4(const char *sdp, char *out, size_t out_len)
+{
+    const char *p = sdp;
+    unsigned field = 0;
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    char tok[128];
+    size_t n;
+
+    if (sdp == NULL || out == NULL || out_len < 8)
+        return 0;
+    if (p[0] == 'a' && p[1] == '=')
+        p += 2;
+    if (strncmp(p, "candidate:", 10) == 0)
+        p += 10;
+    while (*p)
+    {
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (*p == '\0')
+            break;
+        n = 0;
+        while (p[n] && p[n] != ' ' && p[n] != '\t' && n + 1 < sizeof(tok))
+            n++;
+        memcpy(tok, p, n);
+        tok[n] = '\0';
+        p += n;
+        /* After stripping "candidate:", fields are foundation(0) … address(4). */
+        if (field == 4U)
+        {
+            if (sscanf(tok, "%u.%u.%u.%u", &a, &b, &c, &d) == 4 && a <= 255U &&
+                b <= 255U && c <= 255U && d <= 255U)
+            {
+                snprintf(out, out_len, "%u.%u.%u.%u", a, b, c, d);
+                return 1;
+            }
+            return 0;
+        }
+        field++;
+    }
+    return 0;
+}
+
+static int ice_sdp_has_public_ipv4(const char *sdp)
+{
+    char ip[64];
+    if (!ice_sdp_candidate_ipv4(sdp, ip, sizeof(ip)))
+        return 0;
+    return !ice_ipv4_is_private(ip);
+}
+
+static void ice_note_remote_candidate(RNetIceAgent *a, const char *sdp)
+{
+    if (a == NULL || sdp == NULL || sdp[0] == '\0')
+        return;
+    a->remote_cand_count++;
+    if (ice_sdp_has_public_ipv4(sdp))
+        a->remote_public_cand_count++;
+}
+
 int rnet_ice_agent_has_turn(const RNetIceAgent *agent)
 {
     return agent != NULL && agent->turn_count > 0;
+}
+
+/* Remotes seen and every IPv4 address was private (typical CGNAT host
+ * candidates before typ relay arrives). Informational for fallback logs. */
+int rnet_ice_agent_remote_only_private(const RNetIceAgent *agent)
+{
+    return agent != NULL && agent->remote_cand_count > 0U &&
+           agent->remote_public_cand_count == 0U;
 }
 
 int rnet_ice_agent_is_force_relay(const RNetIceAgent *agent)
@@ -415,6 +584,12 @@ int rnet_ice_agent_is_force_relay(const RNetIceAgent *agent)
 int rnet_ice_agent_relay_fallback_done(const RNetIceAgent *agent)
 {
     return agent != NULL && agent->relay_fallback_done != 0;
+}
+
+void rnet_ice_agent_mark_relay_fallback_done(RNetIceAgent *agent)
+{
+    if (agent != NULL)
+        agent->relay_fallback_done = 1;
 }
 
 int rnet_ice_agent_restart_force_relay(RNetIceAgent *agent)
@@ -450,6 +625,8 @@ void rnet_ice_agent_destroy(RNetIceAgent *agent)
 static int ice_gather_now(RNetIceAgent *agent)
 {
     char local_sdp[JUICE_MAX_SDP_STRING_LEN];
+    char filtered[JUICE_MAX_SDP_STRING_LEN];
+    const char *emit_sdp;
     if (agent->gather_started)
     {
         return 0;
@@ -462,7 +639,11 @@ static int ice_gather_now(RNetIceAgent *agent)
     agent->gather_pending = 0;
     if (juice_get_local_description(agent->agent, local_sdp, sizeof(local_sdp)) == 0)
     {
-        emit_signal(agent, RNET_SIGNAL_LOCAL_SDP, local_sdp, 0);
+        emit_sdp = local_sdp;
+        if (agent->force_relay &&
+            ice_sdp_strip_non_relay(local_sdp, filtered, sizeof(filtered)) == 0)
+            emit_sdp = filtered;
+        emit_signal(agent, RNET_SIGNAL_LOCAL_SDP, emit_sdp, 0);
     }
     return 0;
 }
@@ -533,6 +714,9 @@ void rnet_ice_agent_push_signal(RNetIceAgent *agent, const RNetSignal *msg)
              * juice so set_remote_description applies a fresh offer. */
             if (agent->remote_desc_set)
             {
+                /* Peer restarted ICE (often their TURN fallback). Adopt
+                 * force_relay so both sides gather typ relay — including when
+                 * prior remotes were RFC1918-only (CGNAT host candidates). */
                 if (agent->turn_count > 0 && !agent->force_relay)
                 {
                     agent->force_relay = 1;
@@ -546,12 +730,19 @@ void rnet_ice_agent_push_signal(RNetIceAgent *agent, const RNetSignal *msg)
             }
             if (agent->agent == NULL)
                 break;
-            if (juice_set_remote_description(agent->agent, msg->text) == 0)
             {
-                agent->remote_desc_set = 1;
-                if (agent->gather_pending || !agent->controlling)
+                char filtered[JUICE_MAX_SDP_STRING_LEN];
+                const char *remote_sdp = msg->text;
+                if (agent->force_relay &&
+                    ice_sdp_strip_non_relay(msg->text, filtered, sizeof(filtered)) == 0)
+                    remote_sdp = filtered;
+                if (juice_set_remote_description(agent->agent, remote_sdp) == 0)
                 {
-                    (void)ice_gather_now(agent);
+                    agent->remote_desc_set = 1;
+                    if (agent->gather_pending || !agent->controlling)
+                    {
+                        (void)ice_gather_now(agent);
+                    }
                 }
             }
         }
@@ -561,6 +752,7 @@ void rnet_ice_agent_push_signal(RNetIceAgent *agent, const RNetSignal *msg)
             break;
         if (agent->force_relay && !ice_candidate_is_relay(msg->text))
             break;
+        ice_note_remote_candidate(agent, msg->text);
         (void)juice_add_remote_candidate(agent->agent, msg->text);
         break;
     case RNET_SIGNAL_GATHERING_DONE:
@@ -592,10 +784,16 @@ RNetIceState rnet_ice_agent_state(const RNetIceAgent *agent)
 int rnet_ice_agent_send(RNetIceAgent *agent, const rnet_u8 *buf, size_t len)
 {
     int rc;
+    RNetIceState st;
     if ((agent == NULL) || (agent->agent == NULL) || (buf == NULL) || (len == 0))
     {
         return -1;
     }
+    /* Quietly drop during gather / force_relay restart — avoids libjuice
+     * "Send while ICE is not connected" spam before COMPLETED. */
+    st = agent->state;
+    if (st != RNET_ICE_STATE_CONNECTED && st != RNET_ICE_STATE_COMPLETED)
+        return -1;
     rc = juice_send(agent->agent, (const char *)buf, len);
     if (rc < 0)
     {

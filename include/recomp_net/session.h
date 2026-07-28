@@ -138,6 +138,9 @@ typedef struct RNetSessionStats
     char ice_remote[96];
     int state_busy;
     rnet_u8 state_op;
+    int state_sender;          /* 1 while local peer is the STATE sender */
+    rnet_u32 state_bytes_total; /* active xfer size (0 if idle) */
+    rnet_u32 state_bytes_acked; /* sender: peer ACK; receiver: contiguity */
     rnet_u32 packets_rx;
     rnet_u32 input_bundle_sends;
 } RNetSessionStats;
@@ -151,8 +154,9 @@ void rnet_session_get_stats(const RNetSession *s, RNetSessionStats *out);
 
 /*
  * Hash probe (host→guest): announce (op, slot, size, crc).
- * - SAVE + size==0: coordinate local save (no admit stall — savestate_poll).
- * - LOAD + size==0: post-load ready rendezvous (host stalls until guest ACK).
+ * - SAVE + size==0: coordinate local save (no INPUT/admit stall — savestate_poll).
+ * - LOAD + size==0: post-load ready rendezvous (no INPUT stall — late applier
+ *   still needs tip rows; app freezes sim until mutual ready + hard_resync).
  * - size!=0: hash announce; stalls until probe_finish or following transfer.
  */
 int rnet_session_state_probe(RNetSession *s, rnet_u8 op, rnet_u8 slot, rnet_u32 total_size,

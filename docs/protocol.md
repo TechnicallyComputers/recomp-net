@@ -98,7 +98,8 @@ identical.
   local write is done). Does **not** stall admit (deferred saves must still
   reach a block boundary).
 - `op=LOAD`, `total_size == 0`: post-load ready rendezvous (not a content hash).
-  Host stalls admit until the guest ACKs.
+  Does **not** stall INPUT (late applier still needs tip rows); the app freezes
+  sim until mutual ready + `hard_resync`.
 - Hash probes (`total_size != 0`): stall until agree or transfer.
 
 **PROBE_REPLY:** `local_slot`, `op`, `slot`, `match : u8` (1 = agree / coord done).

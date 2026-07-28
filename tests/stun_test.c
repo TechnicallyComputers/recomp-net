@@ -80,6 +80,7 @@ static void parser_tests(void)
     rnet_u8 packet[128];
     rnet_u8 other_transaction[12];
     rnet_u32 address = 0;
+    rnet_u16 mapped_port = 0;
     size_t length;
     int parsed;
 
@@ -87,18 +88,20 @@ static void parser_tests(void)
     length = add_padded_unknown(packet, length);
     length = add_mapped(packet, length, 0x0020, 0xcb007109U);
     finish_response(packet, length);
-    parsed = rnet_stun_parse_binding_response(packet, length, transaction,
-                                              &address);
-    expect_true(parsed == RNET_STUN_PARSE_OK && address == 0xcb007109U,
-                "XOR-MAPPED-ADDRESS decodes RFC cookie");
+    parsed = rnet_stun_parse_binding_response_ex(packet, length, transaction,
+                                                 &address, &mapped_port);
+    expect_true(parsed == RNET_STUN_PARSE_OK && address == 0xcb007109U &&
+                    mapped_port == 7777U,
+                "XOR-MAPPED-ADDRESS decodes RFC cookie + port");
 
     length = response_header(packet, transaction);
     length = add_mapped(packet, length, 0x0001, 0xc6336407U);
     finish_response(packet, length);
-    parsed = rnet_stun_parse_binding_response(packet, length, transaction,
-                                              &address);
-    expect_true(parsed == RNET_STUN_PARSE_OK && address == 0xc6336407U,
-                "MAPPED-ADDRESS is accepted as fallback");
+    parsed = rnet_stun_parse_binding_response_ex(packet, length, transaction,
+                                                 &address, &mapped_port);
+    expect_true(parsed == RNET_STUN_PARSE_OK && address == 0xc6336407U &&
+                    mapped_port == 7777U,
+                "MAPPED-ADDRESS is accepted as fallback with port");
 
     length = response_header(packet, transaction);
     length = add_mapped(packet, length, 0x0001, 0xc6336407U);

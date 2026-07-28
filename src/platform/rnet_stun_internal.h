@@ -13,7 +13,14 @@ enum {
     RNET_STUN_PARSE_ERROR = -1
 };
 
-/* Parse an RFC 5389 Binding Success Response. address_out is host byte order. */
+/* Parse an RFC 5389 Binding Success Response.
+ * address_out / port_out are host byte order. port_out may be NULL. */
+int rnet_stun_parse_binding_response_ex(
+    const rnet_u8 *packet, size_t packet_len,
+    const rnet_u8 transaction_id[RNET_STUN_TRANSACTION_ID_SIZE],
+    rnet_u32 *address_out, rnet_u16 *port_out);
+
+/* Compat wrapper — discards mapped port. */
 int rnet_stun_parse_binding_response(
     const rnet_u8 *packet, size_t packet_len,
     const rnet_u8 transaction_id[RNET_STUN_TRANSACTION_ID_SIZE],

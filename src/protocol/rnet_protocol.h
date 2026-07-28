@@ -46,13 +46,16 @@ int rnet_proto_encode_hello(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 s
                             rnet_u8 slot_count, rnet_u8 delay);
 int rnet_proto_encode_ready(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot);
 int rnet_proto_encode_start(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u32 start_tick);
+/* input_epoch: bumps on hard_resync so in-flight tips from a prior post-load
+ * epoch cannot first-wins poison the new sim_tick=0 window (pad bytes). */
 int rnet_proto_encode_input(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
-                            rnet_u32 ack_tick, const RNetWireFrame *frames, int frame_count);
+                            rnet_u16 input_epoch, rnet_u32 ack_tick, const RNetWireFrame *frames,
+                            int frame_count);
 int rnet_proto_encode_delay_sync(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 new_delay,
                                  rnet_u32 effective_tick);
 /* Agree on resolved pad hash for sim_tick before publish/advance. */
 int rnet_proto_encode_input_confirm(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
-                                    rnet_u32 sim_tick, rnet_u32 input_hash);
+                                    rnet_u16 input_epoch, rnet_u32 sim_tick, rnet_u32 input_hash);
 /* Graceful peer leave (best-effort UDP). */
 int rnet_proto_encode_bye(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot);
 
@@ -83,6 +86,7 @@ typedef struct RNetDecodedPacket
     rnet_u32 effective_tick;
     rnet_u32 confirm_sim_tick;
     rnet_u32 confirm_hash;
+    rnet_u16 input_epoch; /* INPUT / INPUT_CONFIRM generation (hard_resync) */
     int frame_count;
     RNetWireFrame frames[RNET_MAX_BUNDLE];
     /* STATE_* */

@@ -6,6 +6,10 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
 option(RNET_ENABLE_ICE "Build libjuice ICE transport" OFF)
+option(RNET_ICE_BUNDLE_STATIC
+  "Fetch/build static libjuice into recomp_net (portable; no system .so)" ON)
+option(RNET_ICE_FORCE_TURN
+  "Testing: only emit/accept ICE typ relay candidates (requires TURN)" OFF)
 option(RNET_BUILD_EXAMPLES "Build example programs" ON)
 option(RNET_BUILD_TESTS "Build unit tests" ON)
 
@@ -18,6 +22,9 @@ set(RNET_CORE_SOURCES
   src/protocol/rnet_protocol.c
   src/input/rnet_rings.c
   src/lobby/rnet_lan_lobby.c
+  src/lobby/rnet_lan_direct.c
+  src/lobby/rnet_lan_beacon.c
+  src/lobby/rnet_rtt_probe.c
   src/transport/rnet_transport.c
   src/session/rnet_session.c
   src/ice/rnet_ice_state.c
@@ -45,10 +52,21 @@ if(WIN32)
 endif()
 
 if(RNET_ENABLE_ICE)
-  find_package(Libjuice QUIET)
-  if(NOT Libjuice_FOUND)
+  # Portable game embeds: prefer a static juice linked into recomp_net so Linux
+  # binaries do not depend on a distro libjuice.so at runtime. Opt out with
+  # -DRNET_ICE_BUNDLE_STATIC=OFF to use find_package(Libjuice) (shared OK).
+  set(_rnet_juice_ok FALSE)
+  if(NOT RNET_ICE_BUNDLE_STATIC)
+    find_package(Libjuice QUIET)
+    if(Libjuice_FOUND)
+      set(_rnet_juice_ok TRUE)
+    endif()
+  endif()
+  if(NOT _rnet_juice_ok)
     include(FetchContent)
-    message(STATUS "Libjuice not found locally; FetchContent paullouisageneau/libjuice")
+    message(STATUS
+      "Libjuice: bundling static juice via FetchContent "
+      "(RNET_ICE_BUNDLE_STATIC=${RNET_ICE_BUNDLE_STATIC})")
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
     set(NO_TESTS ON CACHE BOOL "" FORCE)
     set(NO_SERVER ON CACHE BOOL "" FORCE)
@@ -57,10 +75,17 @@ if(RNET_ENABLE_ICE)
     FetchContent_Declare(
       libjuice
       GIT_REPOSITORY https://github.com/paullouisageneau/libjuice.git
-      GIT_TAG        v1.5.9
+      GIT_TAG        v1.7.2
       GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(libjuice)
+    # Parent -std=c11 / strict ISO hides getaddrinfo without a feature macro.
+    if(TARGET juice-static)
+      target_compile_definitions(juice-static PRIVATE _GNU_SOURCE)
+    endif()
+    if(TARGET juice)
+      target_compile_definitions(juice PRIVATE _GNU_SOURCE)
+    endif()
     if(NOT TARGET Libjuice::Libjuice)
       if(TARGET juice-static)
         add_library(Libjuice::Libjuice ALIAS juice-static)
@@ -69,12 +94,17 @@ if(RNET_ENABLE_ICE)
       else()
         message(FATAL_ERROR
           "RNET_ENABLE_ICE=ON but libjuice was not found and FetchContent did not "
-          "produce a juice target. Install libjuice, set RNET_LIBJUICE_ROOT, or "
-          "vendor sources under third_party/libjuice.")
+          "produce a juice target. Install libjuice, set RNET_LIBJUICE_ROOT, "
+          "vendor sources under third_party/libjuice, or enable network for "
+          "FetchContent.")
       endif()
     endif()
   endif()
   target_compile_definitions(recomp_net PUBLIC RNET_ENABLE_ICE=1)
+  if(RNET_ICE_FORCE_TURN)
+    target_compile_definitions(recomp_net PUBLIC RNET_ICE_FORCE_TURN=1)
+    message(STATUS "recomp_net: RNET_ICE_FORCE_TURN — relay-only ICE candidates")
+  endif()
   target_link_libraries(recomp_net PUBLIC Libjuice::Libjuice)
   if(UNIX AND NOT APPLE)
     find_package(Threads REQUIRED)

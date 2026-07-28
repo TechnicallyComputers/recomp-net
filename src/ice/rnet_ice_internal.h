@@ -30,8 +30,12 @@ void rnet_ice_agent_selected_info(const RNetIceAgent *agent, char *path_out, siz
                                   char *local_addr_out, size_t local_addr_len,
                                   char *remote_addr_out, size_t remote_addr_len);
 int rnet_ice_agent_has_turn(const RNetIceAgent *agent);
+/* Nonzero when remotes were seen and every IPv4 address was private. */
+int rnet_ice_agent_remote_only_private(const RNetIceAgent *agent);
 int rnet_ice_agent_is_force_relay(const RNetIceAgent *agent);
 int rnet_ice_agent_relay_fallback_done(const RNetIceAgent *agent);
+/* Mark fallback as consumed without restarting (e.g. skipped for LAN peers). */
+void rnet_ice_agent_mark_relay_fallback_done(RNetIceAgent *agent);
 /* Destroy/recreate juice with force_relay=1 and restart gathering. */
 int rnet_ice_agent_restart_force_relay(RNetIceAgent *agent);
 
@@ -100,6 +104,11 @@ static inline int rnet_ice_agent_has_turn(const RNetIceAgent *agent)
     (void)agent;
     return 0;
 }
+static inline int rnet_ice_agent_remote_only_private(const RNetIceAgent *agent)
+{
+    (void)agent;
+    return 0;
+}
 static inline int rnet_ice_agent_is_force_relay(const RNetIceAgent *agent)
 {
     (void)agent;
@@ -109,6 +118,10 @@ static inline int rnet_ice_agent_relay_fallback_done(const RNetIceAgent *agent)
 {
     (void)agent;
     return 0;
+}
+static inline void rnet_ice_agent_mark_relay_fallback_done(RNetIceAgent *agent)
+{
+    (void)agent;
 }
 static inline int rnet_ice_agent_restart_force_relay(RNetIceAgent *agent)
 {

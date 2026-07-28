@@ -8,6 +8,7 @@ extern "C" {
 #endif
 
 #define RNET_IPV4_ADDRESS_TEXT_MAX 16
+#define RNET_ENDPOINT_TEXT_MAX 64
 #define RNET_INTERFACE_LABEL_MAX 128
 #define RNET_STUN_DEFAULT_HOST "stun.l.google.com"
 #define RNET_STUN_DEFAULT_PORT 19302
@@ -34,8 +35,12 @@ int rnet_ipv4_enumerate(RNetIpv4Address *out, size_t capacity);
 
 /* Synchronous RFC 5389 STUN discovery. A NULL config, or zero/empty config
  * fields, selects the defaults above. Positive timeout values are clamped to
- * RNET_STUN_MAX_TIMEOUT_MS. The result is an IPv4 address only;
- * NAT port mapping and reachability still depend on the host/router. */
+ * RNET_STUN_MAX_TIMEOUT_MS.
+ *
+ * rnet_external_ipv4_discover returns an IPv4 address only (ephemeral socket).
+ * rnet_external_udp_endpoint_discover binds bind_hostport (e.g. "0.0.0.0:7777")
+ * and returns the server-reflexive "A.B.C.D:mapped_port" for lobby advertise /
+ * list RTT. Close any other owner of that UDP port first. */
 typedef struct RNetExternalIpv4Config {
     const char *stun_host;
     unsigned short stun_port;
@@ -49,12 +54,17 @@ enum {
     RNET_EXTERNAL_IPV4_ERR_SOCKET = -3,
     RNET_EXTERNAL_IPV4_ERR_TIMEOUT = -4,
     RNET_EXTERNAL_IPV4_ERR_PROTOCOL = -5,
-    RNET_EXTERNAL_IPV4_ERR_RANDOM = -6
+    RNET_EXTERNAL_IPV4_ERR_RANDOM = -6,
+    RNET_EXTERNAL_IPV4_ERR_BIND = -7
 };
 
 void rnet_external_ipv4_config_init(RNetExternalIpv4Config *config);
 int rnet_external_ipv4_discover(const RNetExternalIpv4Config *config,
                                 char *out, size_t out_len);
+int rnet_external_udp_endpoint_discover(const RNetExternalIpv4Config *config,
+                                        const char *bind_hostport,
+                                        char *out_endpoint,
+                                        size_t out_endpoint_len);
 
 /* Exclusive UDP bind probe (no SO_REUSEADDR) so a busy lobby port is detected.
  * Returns 1 when the port can be bound on INADDR_ANY, else 0. */
