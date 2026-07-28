@@ -43,6 +43,12 @@ target_include_directories(recomp_net
 target_compile_definitions(recomp_net PRIVATE $<$<PLATFORM_ID:Windows>:_CRT_SECURE_NO_WARNINGS>)
 if(UNIX)
   target_compile_definitions(recomp_net PRIVATE _POSIX_C_SOURCE=200809L _DEFAULT_SOURCE)
+  # Darwin gates BSD extensions in <net/if.h> behind
+  # `!_POSIX_C_SOURCE || _DARWIN_C_SOURCE`. Strict POSIX above hides IFF_UP
+  # (rnet_address.c). _DEFAULT_SOURCE is glibc-only and does nothing here.
+  if(APPLE)
+    target_compile_definitions(recomp_net PRIVATE _DARWIN_C_SOURCE)
+  endif()
 endif()
 
 if(WIN32)
