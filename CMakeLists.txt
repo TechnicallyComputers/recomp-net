@@ -21,6 +21,7 @@ set(RNET_CORE_SOURCES
   src/platform/rnet_stun.c
   src/protocol/rnet_protocol.c
   src/input/rnet_rings.c
+  src/input/rnet_input_contract.c
   src/lobby/rnet_lan_lobby.c
   src/lobby/rnet_lan_direct.c
   src/lobby/rnet_lan_beacon.c
@@ -174,6 +175,10 @@ if(RNET_BUILD_TESTS)
   add_executable(session_state_test tests/session_state_test.c)
   target_link_libraries(session_state_test PRIVATE recomp_net)
   add_test(NAME session_state_test COMMAND session_state_test)
+
+  add_executable(input_contract_test tests/input_contract_test.c)
+  target_link_libraries(input_contract_test PRIVATE recomp_net)
+  add_test(NAME input_contract_test COMMAND input_contract_test)
 endif()
 
 install(TARGETS recomp_net ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)
