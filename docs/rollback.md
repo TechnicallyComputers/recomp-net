@@ -10,7 +10,28 @@ lands here in layers so hosts opt in without breaking MotK / snes / psx titles.
 |-------|--------|----------|
 | Portable input contract | Landed | [`include/recomp_net/input_contract.h`](../include/recomp_net/input_contract.h), [`src/input/rnet_input_contract.c`](../src/input/rnet_input_contract.c) |
 | Rollback episode orchestration | Landed | [`include/recomp_net/rollback.h`](../include/recomp_net/rollback.h), [`src/rollback/rnet_rollback.c`](../src/rollback/rnet_rollback.c) |
-| Transport/protocol extensions | Planned | new opcodes beside existing INPUT/CONFIRM |
+| Rollback wire protocol | Landed | `RNET_PKT_RB_*` (opcodes 20–25) in [`src/protocol/rnet_protocol.{h,c}`](../src/protocol/rnet_protocol.h) |
+
+## Rollback wire protocol
+
+Additive, non-colliding opcode range for rollback-mode sessions. Delay-sync
+hosts never emit or parse these. Seal rows are fixed 7-byte frames
+(`RNetRbWireFrame`: buttons 2 + sticks 2 + source + predicted + valid) with the
+tick derived from `row_begin + index`.
+
+| Opcode | Packet | Payload |
+|--------|--------|---------|
+| 20 | `RB_SYNC` | correction tuple `(epoch, mismatch, load, target, slot, initiator)` |
+| 21 | `RB_SEAL_ROWS` | peer-authority sealed rows chunk (tuple + rows) |
+| 22 | `RB_BASELINE` | post-load digests (master + 3 partitions) for the baseline gate |
+| 23 | `RB_POST` | post-replay digests + match flag (commit / deepen / abort) |
+| 24 | `RB_FRAME_COMMIT` | state/master-hash watermark agreement token |
+| 25 | `RB_RESOLVED` | resolved-through / shared frontier advertise |
+
+Hosts map their existing wire onto these when aligning transports (BattleShip's
+soak-hardened `SYNETPEER_*` format stays authoritative for live matches); new
+recomp-net rollback hosts may use `RNET_PKT_RB_*` natively. Transport/ICE
+unification is a follow-up — the delay-sync ICE path is unchanged.
 
 ## Rollback episode orchestration
 
