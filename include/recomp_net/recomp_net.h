@@ -6,6 +6,7 @@
 #include "recomp_net/ice.h"
 #include "recomp_net/input.h"
 #include "recomp_net/input_contract.h"
+#include "recomp_net/rollback.h"
 #include "recomp_net/lan_lobby.h"
 #include "recomp_net/lan_direct.h"
 #include "recomp_net/lan_beacon.h"

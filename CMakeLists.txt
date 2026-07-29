@@ -22,6 +22,7 @@ set(RNET_CORE_SOURCES
   src/protocol/rnet_protocol.c
   src/input/rnet_rings.c
   src/input/rnet_input_contract.c
+  src/rollback/rnet_rollback.c
   src/lobby/rnet_lan_lobby.c
   src/lobby/rnet_lan_direct.c
   src/lobby/rnet_lan_beacon.c
@@ -179,6 +180,10 @@ if(RNET_BUILD_TESTS)
   add_executable(input_contract_test tests/input_contract_test.c)
   target_link_libraries(input_contract_test PRIVATE recomp_net)
   add_test(NAME input_contract_test COMMAND input_contract_test)
+
+  add_executable(rollback_episode_test tests/rollback_episode_test.c)
+  target_link_libraries(rollback_episode_test PRIVATE recomp_net)
+  add_test(NAME rollback_episode_test COMMAND rollback_episode_test)
 endif()
 
 install(TARGETS recomp_net ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)

@@ -9,8 +9,39 @@ lands here in layers so hosts opt in without breaking MotK / snes / psx titles.
 | Layer | Status | Location |
 |-------|--------|----------|
 | Portable input contract | Landed | [`include/recomp_net/input_contract.h`](../include/recomp_net/input_contract.h), [`src/input/rnet_input_contract.c`](../src/input/rnet_input_contract.c) |
-| Rollback episode orchestration | Planned | `include/recomp_net/rollback.h` + `src/rollback/` |
+| Rollback episode orchestration | Landed | [`include/recomp_net/rollback.h`](../include/recomp_net/rollback.h), [`src/rollback/rnet_rollback.c`](../src/rollback/rnet_rollback.c) |
 | Transport/protocol extensions | Planned | new opcodes beside existing INPUT/CONFIRM |
+
+## Rollback episode orchestration
+
+`RNetRbSession` owns the episode FSM (`Live → SealInputs → AwaitingBaseline →
+Replay → Verify → Commit|Abort`), the correction tuple, the sealed input table,
+and the resolved-through (shared frontier) watermark. The host owns snapshots,
+the deterministic sim step, state digests, and the wire transport.
+
+Required `RNetRollbackVTable` callbacks: `save_state` / `load_state` /
+`advance_sim` / `get_input_row` (+ `state_digest`, `hash_confirm_through`).
+Host stick gates ride through `stick_gates` and feed
+`rnet_rb_decide_stick_replace`.
+
+Minimal host loop during an episode:
+
+```c
+rnet_rb_begin_episode(s, &corr);                 /* mismatch identified */
+rnet_rb_seal_inputs(s, corr.mismatch_tick, corr.target_tick, corr.slot);
+/* exchange peer seal rows via host transport: rnet_rb_export_seal_rows_chunk /
+ * rnet_rb_apply_peer_seal_rows until rnet_rb_all_peer_seal_rows_complete */
+rnet_rb_set_phase(s, nRNetRbPhaseAwaitingBaseline);
+vt.load_state(vt.ctx, corr.load_tick);
+for (t = corr.load_tick; t <= corr.target_tick; ++t)
+    vt.advance_sim(vt.ctx, t);                   /* reads sealed rows */
+/* compare vt.state_digest against peer; then: */
+rnet_rb_on_post_match(s);                        /* or rnet_rb_on_post_diverge */
+```
+
+The library is transport-agnostic in Phase 2 — BattleShip's `netpeer.c` calls
+these entry points from its existing packet ingress. Protocol/ICE opcodes are
+Phase 3.
 
 ## Portable input contract
 
