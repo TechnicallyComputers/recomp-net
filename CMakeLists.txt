@@ -184,6 +184,11 @@ if(RNET_BUILD_TESTS)
   add_executable(rollback_episode_test tests/rollback_episode_test.c)
   target_link_libraries(rollback_episode_test PRIVATE recomp_net)
   add_test(NAME rollback_episode_test COMMAND rollback_episode_test)
+
+  add_executable(rb_wire_test tests/rb_wire_test.c)
+  target_link_libraries(rb_wire_test PRIVATE recomp_net)
+  target_include_directories(rb_wire_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  add_test(NAME rb_wire_test COMMAND rb_wire_test)
 endif()
 
 install(TARGETS recomp_net ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)
