@@ -70,7 +70,9 @@ typedef struct RNetRbCorrection
 } RNetRbCorrection;
 
 /* Opaque per-slot input row the library seals and replays. The library never
- * interprets the payload beyond the stick-replace contract view. */
+ * interprets the payload beyond the stick-replace contract view.
+ * analog: host pad type (0 = digital / poll 0x41, 1 = DualShock / 0x73).
+ * Carried on the seal wire in RNetRbWireFrame.source (was always 0). */
 typedef struct RNetRbFrame
 {
     uint32_t tick;
@@ -79,6 +81,7 @@ typedef struct RNetRbFrame
     int8_t stick_y;
     uint8_t is_predicted;
     uint8_t is_valid;
+    uint8_t analog;
 } RNetRbFrame;
 
 typedef struct RNetRbEvent
@@ -127,6 +130,9 @@ typedef struct RNetRbConfig
     uint32_t local_slot;       /* this host's player slot */
     uint32_t delay;            /* committed input delay D */
     uint32_t seal_max_span;    /* <= RNET_RB_SEAL_MAX_SPAN; 0 = default */
+    /* Active seats in this match (1..RNET_RB_MAX_SLOTS). Peer-seal completion
+     * only waits on slots in [0, slot_count) excluding local_slot. 0 => 2. */
+    uint32_t slot_count;
 } RNetRbConfig;
 
 /* Lifecycle. */
@@ -165,13 +171,16 @@ RNetInputContractDecision rnet_rb_decide_stick_replace(RNetRbSession *s,
 /* Sealed input table. Local-authority rows seal from the host's input history;
  * peer-authority rows arrive via apply_peer_seal_rows. The sealed table is the
  * sole replay read set. */
-void rnet_rb_seal_inputs(RNetRbSession *s, uint32_t mismatch_tick, uint32_t target_tick,
+/* begin_tick..target_tick inclusive — pass load_tick (not only mismatch) so
+ * Replay can publish sealed pads for every resim quantum. */
+void rnet_rb_seal_inputs(RNetRbSession *s, uint32_t begin_tick, uint32_t target_tick,
                          int32_t correction_slot);
 uint8_t rnet_rb_inputs_sealed(const RNetRbSession *s);
 uint8_t rnet_rb_tick_in_sealed_span(const RNetRbSession *s, uint32_t tick);
 uint8_t rnet_rb_get_sealed_frame(const RNetRbSession *s, int32_t slot, uint32_t tick,
                                  RNetRbFrame *out_frame);
 uint32_t rnet_rb_get_seal_span(const RNetRbSession *s);
+uint32_t rnet_rb_get_seal_base_tick(const RNetRbSession *s);
 
 /* Peer seal-row exchange (host transports the chunks; library validates tuple
  * compatibility, marks completion, and gates forward replay). */

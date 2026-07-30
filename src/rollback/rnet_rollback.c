@@ -24,9 +24,11 @@ struct RNetRbSession
     RNetRbPhase phase;
     RNetRbCorrection corr;
 
-    /* Sealed input table: [span][slot]. Span indexes offset from mismatch. */
+    /* Sealed input table: [span][slot]. Span indexes offset from seal_base_tick
+     * (usually load_tick so Replay can publish every resim tick). */
     RNetRbFrame *sealed;      /* sealed_max_span * RNET_RB_MAX_SLOTS */
     uint32_t sealed_span;
+    uint32_t seal_base_tick;
     uint8_t inputs_sealed;
 
     /* Per-slot peer-seal completion bitmask over the sealed span. */
@@ -69,6 +71,19 @@ RNetRbSession *rnet_rb_create(const RNetRbConfig *cfg, const RNetRollbackVTable 
     {
         s->cfg.seal_max_span = RNET_RB_SEAL_MAX_SPAN;
     }
+    if (s->cfg.slot_count == 0u)
+    {
+        s->cfg.slot_count = 2u; /* delay-sync default: P2 */
+    }
+    if (s->cfg.slot_count > RNET_RB_MAX_SLOTS)
+    {
+        s->cfg.slot_count = RNET_RB_MAX_SLOTS;
+    }
+    if (s->cfg.local_slot >= s->cfg.slot_count)
+    {
+        free(s);
+        return NULL;
+    }
     s->sealed = (RNetRbFrame *)calloc((size_t)s->cfg.seal_max_span * RNET_RB_MAX_SLOTS,
                                       sizeof(RNetRbFrame));
     if (s->sealed == NULL)
@@ -100,6 +115,7 @@ void rnet_rb_session_reset(RNetRbSession *s)
     memset(&s->corr, 0, sizeof(s->corr));
     s->corr.slot = -1;
     s->sealed_span = 0u;
+    s->seal_base_tick = 0u;
     s->inputs_sealed = 0u;
     memset(s->peer_seal_mask, 0, sizeof(s->peer_seal_mask));
     s->resolved_through = 0u;
@@ -186,7 +202,7 @@ RNetInputContractDecision rnet_rb_decide_stick_replace(RNetRbSession *s,
                                                     &s->vt.stick_gates);
 }
 
-void rnet_rb_seal_inputs(RNetRbSession *s, uint32_t mismatch_tick, uint32_t target_tick,
+void rnet_rb_seal_inputs(RNetRbSession *s, uint32_t begin_tick, uint32_t target_tick,
                          int32_t correction_slot)
 {
     uint32_t span;
@@ -198,7 +214,7 @@ void rnet_rb_seal_inputs(RNetRbSession *s, uint32_t mismatch_tick, uint32_t targ
     {
         return;
     }
-    span = (target_tick >= mismatch_tick) ? (target_tick - mismatch_tick + 1u) : 0u;
+    span = (target_tick >= begin_tick) ? (target_tick - begin_tick + 1u) : 0u;
     if (span == 0u)
     {
         return;
@@ -208,10 +224,11 @@ void rnet_rb_seal_inputs(RNetRbSession *s, uint32_t mismatch_tick, uint32_t targ
         span = s->cfg.seal_max_span;
     }
     /* Seal local-authority rows from the host's input history; peer-authority
-     * slots arrive via apply_peer_seal_rows. */
+     * slots arrive via apply_peer_seal_rows. begin_tick is typically load_tick
+     * so every Replay quantum has a sealed row. */
     for (offset = 0u; offset < span; ++offset)
     {
-        uint32_t tick = mismatch_tick + offset;
+        uint32_t tick = begin_tick + offset;
         for (slot = 0u; slot < RNET_RB_MAX_SLOTS; ++slot)
         {
             RNetRbFrame *dst = &s->sealed[rnet_rb_seal_index(offset, slot)];
@@ -228,6 +245,7 @@ void rnet_rb_seal_inputs(RNetRbSession *s, uint32_t mismatch_tick, uint32_t targ
             }
         }
     }
+    s->seal_base_tick = begin_tick;
     s->sealed_span = span;
     s->inputs_sealed = 1u;
 }
@@ -243,10 +261,8 @@ uint8_t rnet_rb_tick_in_sealed_span(const RNetRbSession *s, uint32_t tick)
     {
         return 0u;
     }
-    return ((tick >= s->corr.mismatch_tick) &&
-            (tick < s->corr.mismatch_tick + s->sealed_span))
-               ? 1u
-               : 0u;
+    return ((tick >= s->seal_base_tick) && (tick < s->seal_base_tick + s->sealed_span)) ? 1u
+                                                                                         : 0u;
 }
 
 uint8_t rnet_rb_get_sealed_frame(const RNetRbSession *s, int32_t slot, uint32_t tick,
@@ -259,7 +275,7 @@ uint8_t rnet_rb_get_sealed_frame(const RNetRbSession *s, int32_t slot, uint32_t 
     {
         return 0u;
     }
-    offset = tick - s->corr.mismatch_tick;
+    offset = tick - s->seal_base_tick;
     *out_frame = s->sealed[rnet_rb_seal_index(offset, (uint32_t)slot)];
     return out_frame->is_valid;
 }
@@ -267,6 +283,11 @@ uint8_t rnet_rb_get_sealed_frame(const RNetRbSession *s, int32_t slot, uint32_t 
 uint32_t rnet_rb_get_seal_span(const RNetRbSession *s)
 {
     return (s != NULL) ? s->sealed_span : 0u;
+}
+
+uint32_t rnet_rb_get_seal_base_tick(const RNetRbSession *s)
+{
+    return (s != NULL) ? s->seal_base_tick : 0u;
 }
 
 uint8_t rnet_rb_apply_peer_seal_rows(RNetRbSession *s, uint32_t epoch_id, uint32_t mismatch_tick,
@@ -280,8 +301,8 @@ uint8_t rnet_rb_apply_peer_seal_rows(RNetRbSession *s, uint32_t epoch_id, uint32
     {
         return 0u;
     }
-    /* Tuple compatibility: only accept chunks for the live episode. */
-    if ((epoch_id != s->corr.epoch_id) || (mismatch_tick != s->corr.mismatch_tick) ||
+    /* Tuple compatibility: wire "mismatch" field carries seal_base_tick. */
+    if ((epoch_id != s->corr.epoch_id) || (mismatch_tick != s->seal_base_tick) ||
         (target_tick != s->corr.target_tick))
     {
         return 0u;
@@ -293,8 +314,14 @@ uint8_t rnet_rb_apply_peer_seal_rows(RNetRbSession *s, uint32_t epoch_id, uint32
         {
             break;
         }
+        /* Reject empty/invalid rows — a wrong-seat export used to set the mask
+         * with is_valid=0 and falsely complete SealInputs. */
+        if (rows[i].is_valid == 0u)
+        {
+            continue;
+        }
         s->sealed[rnet_rb_seal_index(offset, (uint32_t)slot)] = rows[i];
-        s->sealed[rnet_rb_seal_index(offset, (uint32_t)slot)].tick = mismatch_tick + offset;
+        s->sealed[rnet_rb_seal_index(offset, (uint32_t)slot)].tick = s->seal_base_tick + offset;
         s->peer_seal_mask[(uint32_t)slot] |= (1ull << offset);
     }
     return 1u;
@@ -315,12 +342,20 @@ uint8_t rnet_rb_peer_seal_rows_complete(const RNetRbSession *s, int32_t slot)
 uint8_t rnet_rb_all_peer_seal_rows_complete(const RNetRbSession *s)
 {
     uint32_t slot;
+    uint32_t n;
 
     if ((s == NULL) || (rnet_rb_inputs_sealed(s) == 0u))
     {
         return 0u;
     }
-    for (slot = 0u; slot < RNET_RB_MAX_SLOTS; ++slot)
+    /* Only active match seats — waiting on unused slots (up to MAX=8) deadlocks
+     * 2P MotK episodes forever in SealInputs. */
+    n = s->cfg.slot_count;
+    if (n == 0u || n > RNET_RB_MAX_SLOTS)
+    {
+        n = RNET_RB_MAX_SLOTS;
+    }
+    for (slot = 0u; slot < n; ++slot)
     {
         if (slot == s->cfg.local_slot)
         {

@@ -87,6 +87,7 @@ int main(void)
     memset(&cfg, 0, sizeof(cfg));
     cfg.local_slot = 0u;
     cfg.delay = 3u;
+    cfg.slot_count = 2u; /* 2P — must not wait on unused slots 2..7 */
 
     memset(&vt, 0, sizeof(vt));
     vt.ctx = &host;
@@ -145,11 +146,26 @@ int main(void)
     expect_true(!rnet_rb_apply_peer_seal_rows(s, 99u, corr.mismatch_tick, corr.target_tick, 1, 0u,
                                               rows, 7u),
                 "wrong epoch rejected");
+    /* Invalid rows must not advance the peer-seal mask. */
+    {
+        RNetRbFrame bad[7];
+        uint32_t i;
+        for (i = 0u; i < 7u; ++i) {
+            bad[i] = rows[i];
+            bad[i].is_valid = 0u;
+        }
+        expect_true(rnet_rb_apply_peer_seal_rows(s, corr.epoch_id, corr.mismatch_tick,
+                                                 corr.target_tick, 1, 0u, bad, 7u),
+                    "invalid peer rows accepted as packet");
+        expect_true(!rnet_rb_peer_seal_rows_complete(s, 1),
+                    "invalid rows do not complete seal");
+    }
     expect_true(rnet_rb_apply_peer_seal_rows(s, corr.epoch_id, corr.mismatch_tick, corr.target_tick,
                                              1, 0u, rows, 7u),
                 "peer rows applied");
     expect_true(rnet_rb_peer_seal_rows_complete(s, 1), "slot 1 complete");
-    /* Slot 2 (unused, no peer authority required in this minimal model). */
+    /* With slot_count=2, peer slot 1 alone is enough — unused seats are ignored. */
+    expect_true(rnet_rb_all_peer_seal_rows_complete(s), "all active peer seats sealed");
     expect_true(!rnet_rb_peer_seal_rows_complete(s, 2), "slot 2 incomplete (no rows)");
     expect_true(rnet_rb_get_sealed_frame(s, 1, 54u, &got), "peer sealed row retrievable");
     expect_true(got.buttons == 0x200u, "peer row buttons");
