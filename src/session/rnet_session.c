@@ -130,6 +130,36 @@ struct RNetSession
     int rb_fc_q_head; /* next write */
     int rb_fc_q_tail; /* next read */
     int rb_fc_q_count;
+
+    /* Peer RB episode control queues (latest-wins / small FIFO). */
+#define RNET_RB_CTRL_QUEUE 8
+    struct {
+        rnet_u32 epoch_id, mismatch_tick, load_tick, target_tick;
+        rnet_u8 corrected_slot, initiator;
+    } rb_sync_q[RNET_RB_CTRL_QUEUE];
+    int rb_sync_head, rb_sync_tail, rb_sync_count;
+
+    struct {
+        rnet_u32 epoch_id, mismatch_tick, target_tick, row_begin;
+        rnet_u8 slot;
+        rnet_u16 row_count;
+        RNetRbWireFrame rows[RNET_RB_SEAL_ROWS_CHUNK_MAX];
+    } rb_seal_q[RNET_RB_CTRL_QUEUE];
+    int rb_seal_head, rb_seal_tail, rb_seal_count;
+
+    struct {
+        rnet_u32 epoch_id, load_tick, digest_master, digest_a, digest_b, digest_c;
+    } rb_base_q[RNET_RB_CTRL_QUEUE];
+    int rb_base_head, rb_base_tail, rb_base_count;
+
+    struct {
+        rnet_u32 epoch_id, target_tick, digest_master, input_digest;
+        rnet_u8 match;
+    } rb_post_q[RNET_RB_CTRL_QUEUE];
+    int rb_post_head, rb_post_tail, rb_post_count;
+
+    rnet_u32 rb_resolved_q[RNET_RB_CTRL_QUEUE];
+    int rb_resolved_head, rb_resolved_tail, rb_resolved_count;
 };
 
 static rnet_u64 session_now(RNetSession *s)
@@ -476,11 +506,77 @@ static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
         }
         break;
     case RNET_PKT_RB_SYNC:
+        if (pkt->local_slot != s->cfg.local_slot &&
+            s->rb_sync_count < RNET_RB_CTRL_QUEUE)
+        {
+            s->rb_sync_q[s->rb_sync_head].epoch_id = pkt->rb_epoch_id;
+            s->rb_sync_q[s->rb_sync_head].mismatch_tick = pkt->rb_mismatch_tick;
+            s->rb_sync_q[s->rb_sync_head].load_tick = pkt->rb_load_tick;
+            s->rb_sync_q[s->rb_sync_head].target_tick = pkt->rb_target_tick;
+            s->rb_sync_q[s->rb_sync_head].corrected_slot = pkt->rb_corrected_slot;
+            s->rb_sync_q[s->rb_sync_head].initiator = pkt->rb_initiator;
+            s->rb_sync_head = (s->rb_sync_head + 1) % RNET_RB_CTRL_QUEUE;
+            s->rb_sync_count++;
+        }
+        break;
     case RNET_PKT_RB_SEAL_ROWS:
+        if (pkt->local_slot != s->cfg.local_slot &&
+            s->rb_seal_count < RNET_RB_CTRL_QUEUE)
+        {
+            s->rb_seal_q[s->rb_seal_head].epoch_id = pkt->rb_epoch_id;
+            s->rb_seal_q[s->rb_seal_head].mismatch_tick = pkt->rb_mismatch_tick;
+            s->rb_seal_q[s->rb_seal_head].target_tick = pkt->rb_target_tick;
+            s->rb_seal_q[s->rb_seal_head].row_begin = pkt->rb_row_begin;
+            s->rb_seal_q[s->rb_seal_head].slot = pkt->rb_slot;
+            s->rb_seal_q[s->rb_seal_head].row_count = pkt->rb_row_count;
+            if (pkt->rb_row_count > 0)
+            {
+                rnet_u16 n = pkt->rb_row_count;
+                if (n > RNET_RB_SEAL_ROWS_CHUNK_MAX)
+                    n = RNET_RB_SEAL_ROWS_CHUNK_MAX;
+                memcpy(s->rb_seal_q[s->rb_seal_head].rows, pkt->rb_rows,
+                       sizeof(RNetRbWireFrame) * n);
+                s->rb_seal_q[s->rb_seal_head].row_count = n;
+            }
+            s->rb_seal_head = (s->rb_seal_head + 1) % RNET_RB_CTRL_QUEUE;
+            s->rb_seal_count++;
+        }
+        break;
     case RNET_PKT_RB_BASELINE:
+        if (pkt->local_slot != s->cfg.local_slot &&
+            s->rb_base_count < RNET_RB_CTRL_QUEUE)
+        {
+            s->rb_base_q[s->rb_base_head].epoch_id = pkt->rb_epoch_id;
+            s->rb_base_q[s->rb_base_head].load_tick = pkt->rb_load_tick;
+            s->rb_base_q[s->rb_base_head].digest_master = pkt->rb_digest_master;
+            s->rb_base_q[s->rb_base_head].digest_a = pkt->rb_digest_a;
+            s->rb_base_q[s->rb_base_head].digest_b = pkt->rb_digest_b;
+            s->rb_base_q[s->rb_base_head].digest_c = pkt->rb_digest_c;
+            s->rb_base_head = (s->rb_base_head + 1) % RNET_RB_CTRL_QUEUE;
+            s->rb_base_count++;
+        }
+        break;
     case RNET_PKT_RB_POST:
+        if (pkt->local_slot != s->cfg.local_slot &&
+            s->rb_post_count < RNET_RB_CTRL_QUEUE)
+        {
+            s->rb_post_q[s->rb_post_head].epoch_id = pkt->rb_epoch_id;
+            s->rb_post_q[s->rb_post_head].target_tick = pkt->rb_target_tick;
+            s->rb_post_q[s->rb_post_head].digest_master = pkt->rb_digest_master;
+            s->rb_post_q[s->rb_post_head].input_digest = pkt->rb_input_digest;
+            s->rb_post_q[s->rb_post_head].match = pkt->rb_match;
+            s->rb_post_head = (s->rb_post_head + 1) % RNET_RB_CTRL_QUEUE;
+            s->rb_post_count++;
+        }
+        break;
     case RNET_PKT_RB_RESOLVED:
-        /* Reserved for MotK/host rollback episode wiring; ignore for now. */
+        if (pkt->local_slot != s->cfg.local_slot &&
+            s->rb_resolved_count < RNET_RB_CTRL_QUEUE)
+        {
+            s->rb_resolved_q[s->rb_resolved_head] = pkt->rb_resolved_through;
+            s->rb_resolved_head = (s->rb_resolved_head + 1) % RNET_RB_CTRL_QUEUE;
+            s->rb_resolved_count++;
+        }
         break;
     default:
         break;
@@ -2450,4 +2546,222 @@ int rnet_session_peek_remote_input(const RNetSession *s, int slot, rnet_u32 wire
         return 0;
     }
     return rnet_session_peek_input(s, slot, wire_tick, out);
+}
+
+void rnet_session_set_sim_tick(RNetSession *s, rnet_u32 sim_tick)
+{
+    if (s == NULL)
+    {
+        return;
+    }
+    s->sim_tick = sim_tick;
+}
+
+int rnet_session_send_rb_sync(RNetSession *s, rnet_u32 epoch_id, rnet_u32 mismatch_tick,
+                              rnet_u32 load_tick, rnet_u32 target_tick,
+                              rnet_u8 corrected_slot, rnet_u8 initiator)
+{
+    rnet_u8 buf[RNET_MAX_PACKET];
+    int n;
+    if (s == NULL || s->phase != RNET_PHASE_RUNNING)
+        return -1;
+    n = rnet_proto_encode_rb_sync(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id,
+                                  s->cfg.local_slot, epoch_id, mismatch_tick, load_tick,
+                                  target_tick, corrected_slot, initiator);
+    if (n <= 0)
+        return -1;
+    send_raw(s, buf, n);
+    return 0;
+}
+
+int rnet_session_take_rb_sync(RNetSession *s, rnet_u32 *epoch_id, rnet_u32 *mismatch_tick,
+                              rnet_u32 *load_tick, rnet_u32 *target_tick,
+                              rnet_u8 *corrected_slot, rnet_u8 *initiator)
+{
+    if (s == NULL || s->rb_sync_count <= 0)
+        return 0;
+    if (epoch_id)
+        *epoch_id = s->rb_sync_q[s->rb_sync_tail].epoch_id;
+    if (mismatch_tick)
+        *mismatch_tick = s->rb_sync_q[s->rb_sync_tail].mismatch_tick;
+    if (load_tick)
+        *load_tick = s->rb_sync_q[s->rb_sync_tail].load_tick;
+    if (target_tick)
+        *target_tick = s->rb_sync_q[s->rb_sync_tail].target_tick;
+    if (corrected_slot)
+        *corrected_slot = s->rb_sync_q[s->rb_sync_tail].corrected_slot;
+    if (initiator)
+        *initiator = s->rb_sync_q[s->rb_sync_tail].initiator;
+    s->rb_sync_tail = (s->rb_sync_tail + 1) % RNET_RB_CTRL_QUEUE;
+    s->rb_sync_count--;
+    return 1;
+}
+
+int rnet_session_send_rb_seal_rows(RNetSession *s, rnet_u32 epoch_id, rnet_u32 mismatch_tick,
+                                   rnet_u32 target_tick, rnet_u8 slot, rnet_u32 row_begin,
+                                   const RNetRbFrame *rows, rnet_u16 row_count)
+{
+    rnet_u8 buf[RNET_MAX_PACKET];
+    RNetRbWireFrame wire[RNET_RB_SEAL_ROWS_CHUNK_MAX];
+    rnet_u16 i, n;
+    int enc;
+    if (s == NULL || s->phase != RNET_PHASE_RUNNING || rows == NULL)
+        return -1;
+    n = row_count;
+    if (n > RNET_RB_SEAL_ROWS_CHUNK_MAX)
+        n = RNET_RB_SEAL_ROWS_CHUNK_MAX;
+    for (i = 0; i < n; ++i)
+    {
+        wire[i].buttons = rows[i].buttons;
+        wire[i].stick_x = (rnet_s8)rows[i].stick_x;
+        wire[i].stick_y = (rnet_s8)rows[i].stick_y;
+        wire[i].source = 0;
+        wire[i].is_predicted = rows[i].is_predicted;
+        wire[i].is_valid = rows[i].is_valid;
+    }
+    enc = rnet_proto_encode_rb_seal_rows(buf, sizeof(buf), s->cfg.protocol_magic,
+                                         s->cfg.session_id, s->cfg.local_slot, epoch_id,
+                                         mismatch_tick, target_tick, slot, row_begin, wire, n);
+    if (enc <= 0)
+        return -1;
+    send_raw(s, buf, enc);
+    return 0;
+}
+
+int rnet_session_take_rb_seal_rows(RNetSession *s, rnet_u32 *epoch_id, rnet_u32 *mismatch_tick,
+                                   rnet_u32 *target_tick, rnet_u8 *slot, rnet_u32 *row_begin,
+                                   RNetRbFrame *rows, rnet_u16 *row_count)
+{
+    rnet_u16 i, n;
+    if (s == NULL || s->rb_seal_count <= 0)
+        return 0;
+    if (epoch_id)
+        *epoch_id = s->rb_seal_q[s->rb_seal_tail].epoch_id;
+    if (mismatch_tick)
+        *mismatch_tick = s->rb_seal_q[s->rb_seal_tail].mismatch_tick;
+    if (target_tick)
+        *target_tick = s->rb_seal_q[s->rb_seal_tail].target_tick;
+    if (slot)
+        *slot = s->rb_seal_q[s->rb_seal_tail].slot;
+    if (row_begin)
+        *row_begin = s->rb_seal_q[s->rb_seal_tail].row_begin;
+    n = s->rb_seal_q[s->rb_seal_tail].row_count;
+    if (rows && n > 0)
+    {
+        for (i = 0; i < n; ++i)
+        {
+            rows[i].tick = s->rb_seal_q[s->rb_seal_tail].row_begin + i;
+            rows[i].buttons = s->rb_seal_q[s->rb_seal_tail].rows[i].buttons;
+            rows[i].stick_x = (int8_t)s->rb_seal_q[s->rb_seal_tail].rows[i].stick_x;
+            rows[i].stick_y = (int8_t)s->rb_seal_q[s->rb_seal_tail].rows[i].stick_y;
+            rows[i].is_predicted = s->rb_seal_q[s->rb_seal_tail].rows[i].is_predicted;
+            rows[i].is_valid = s->rb_seal_q[s->rb_seal_tail].rows[i].is_valid;
+        }
+    }
+    if (row_count)
+        *row_count = n;
+    s->rb_seal_tail = (s->rb_seal_tail + 1) % RNET_RB_CTRL_QUEUE;
+    s->rb_seal_count--;
+    return 1;
+}
+
+int rnet_session_send_rb_baseline(RNetSession *s, rnet_u32 epoch_id, rnet_u32 load_tick,
+                                  rnet_u32 digest_master, rnet_u32 digest_a, rnet_u32 digest_b,
+                                  rnet_u32 digest_c)
+{
+    rnet_u8 buf[RNET_MAX_PACKET];
+    int n;
+    if (s == NULL || s->phase != RNET_PHASE_RUNNING)
+        return -1;
+    n = rnet_proto_encode_rb_baseline(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id,
+                                      s->cfg.local_slot, epoch_id, load_tick, digest_master,
+                                      digest_a, digest_b, digest_c);
+    if (n <= 0)
+        return -1;
+    send_raw(s, buf, n);
+    return 0;
+}
+
+int rnet_session_take_rb_baseline(RNetSession *s, rnet_u32 *epoch_id, rnet_u32 *load_tick,
+                                  rnet_u32 *digest_master, rnet_u32 *digest_a, rnet_u32 *digest_b,
+                                  rnet_u32 *digest_c)
+{
+    if (s == NULL || s->rb_base_count <= 0)
+        return 0;
+    if (epoch_id)
+        *epoch_id = s->rb_base_q[s->rb_base_tail].epoch_id;
+    if (load_tick)
+        *load_tick = s->rb_base_q[s->rb_base_tail].load_tick;
+    if (digest_master)
+        *digest_master = s->rb_base_q[s->rb_base_tail].digest_master;
+    if (digest_a)
+        *digest_a = s->rb_base_q[s->rb_base_tail].digest_a;
+    if (digest_b)
+        *digest_b = s->rb_base_q[s->rb_base_tail].digest_b;
+    if (digest_c)
+        *digest_c = s->rb_base_q[s->rb_base_tail].digest_c;
+    s->rb_base_tail = (s->rb_base_tail + 1) % RNET_RB_CTRL_QUEUE;
+    s->rb_base_count--;
+    return 1;
+}
+
+int rnet_session_send_rb_post(RNetSession *s, rnet_u32 epoch_id, rnet_u32 target_tick,
+                              rnet_u32 digest_master, rnet_u32 input_digest, rnet_u8 match)
+{
+    rnet_u8 buf[RNET_MAX_PACKET];
+    int n;
+    if (s == NULL || s->phase != RNET_PHASE_RUNNING)
+        return -1;
+    n = rnet_proto_encode_rb_post(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id,
+                                  s->cfg.local_slot, epoch_id, target_tick, digest_master,
+                                  input_digest, match);
+    if (n <= 0)
+        return -1;
+    send_raw(s, buf, n);
+    return 0;
+}
+
+int rnet_session_take_rb_post(RNetSession *s, rnet_u32 *epoch_id, rnet_u32 *target_tick,
+                              rnet_u32 *digest_master, rnet_u32 *input_digest, rnet_u8 *match)
+{
+    if (s == NULL || s->rb_post_count <= 0)
+        return 0;
+    if (epoch_id)
+        *epoch_id = s->rb_post_q[s->rb_post_tail].epoch_id;
+    if (target_tick)
+        *target_tick = s->rb_post_q[s->rb_post_tail].target_tick;
+    if (digest_master)
+        *digest_master = s->rb_post_q[s->rb_post_tail].digest_master;
+    if (input_digest)
+        *input_digest = s->rb_post_q[s->rb_post_tail].input_digest;
+    if (match)
+        *match = s->rb_post_q[s->rb_post_tail].match;
+    s->rb_post_tail = (s->rb_post_tail + 1) % RNET_RB_CTRL_QUEUE;
+    s->rb_post_count--;
+    return 1;
+}
+
+int rnet_session_send_rb_resolved(RNetSession *s, rnet_u32 resolved_through)
+{
+    rnet_u8 buf[RNET_MAX_PACKET];
+    int n;
+    if (s == NULL || s->phase != RNET_PHASE_RUNNING)
+        return -1;
+    n = rnet_proto_encode_rb_resolved(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id,
+                                      s->cfg.local_slot, resolved_through);
+    if (n <= 0)
+        return -1;
+    send_raw(s, buf, n);
+    return 0;
+}
+
+int rnet_session_take_rb_resolved(RNetSession *s, rnet_u32 *resolved_through)
+{
+    if (s == NULL || s->rb_resolved_count <= 0)
+        return 0;
+    if (resolved_through)
+        *resolved_through = s->rb_resolved_q[s->rb_resolved_tail];
+    s->rb_resolved_tail = (s->rb_resolved_tail + 1) % RNET_RB_CTRL_QUEUE;
+    s->rb_resolved_count--;
+    return 1;
 }

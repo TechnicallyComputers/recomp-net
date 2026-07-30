@@ -4,6 +4,7 @@
 #include "recomp_net/config.h"
 #include "recomp_net/ice.h"
 #include "recomp_net/input.h"
+#include "recomp_net/rollback.h"
 #include "recomp_net/types.h"
 
 #ifdef __cplusplus
@@ -216,6 +217,42 @@ int rnet_session_peek_input(const RNetSession *s, int slot, rnet_u32 wire_tick,
                             RNetInputSample *out);
 int rnet_session_peek_remote_input(const RNetSession *s, int slot, rnet_u32 wire_tick,
                                    RNetInputSample *out);
+
+/* Force session clock (rollback load / resim). Does not clear rings. */
+void rnet_session_set_sim_tick(RNetSession *s, rnet_u32 sim_tick);
+
+/*
+ * Rollback episode wire (opcodes 20–23, 25). MotK drains via take_* after pump.
+ * Seal-row take copies up to RNET_RB_SEAL_ROWS_CHUNK_MAX frames.
+ */
+int rnet_session_send_rb_sync(RNetSession *s, rnet_u32 epoch_id, rnet_u32 mismatch_tick,
+                              rnet_u32 load_tick, rnet_u32 target_tick,
+                              rnet_u8 corrected_slot, rnet_u8 initiator);
+int rnet_session_take_rb_sync(RNetSession *s, rnet_u32 *epoch_id, rnet_u32 *mismatch_tick,
+                              rnet_u32 *load_tick, rnet_u32 *target_tick,
+                              rnet_u8 *corrected_slot, rnet_u8 *initiator);
+
+int rnet_session_send_rb_seal_rows(RNetSession *s, rnet_u32 epoch_id, rnet_u32 mismatch_tick,
+                                   rnet_u32 target_tick, rnet_u8 slot, rnet_u32 row_begin,
+                                   const RNetRbFrame *rows, rnet_u16 row_count);
+int rnet_session_take_rb_seal_rows(RNetSession *s, rnet_u32 *epoch_id, rnet_u32 *mismatch_tick,
+                                   rnet_u32 *target_tick, rnet_u8 *slot, rnet_u32 *row_begin,
+                                   RNetRbFrame *rows, rnet_u16 *row_count);
+
+int rnet_session_send_rb_baseline(RNetSession *s, rnet_u32 epoch_id, rnet_u32 load_tick,
+                                  rnet_u32 digest_master, rnet_u32 digest_a, rnet_u32 digest_b,
+                                  rnet_u32 digest_c);
+int rnet_session_take_rb_baseline(RNetSession *s, rnet_u32 *epoch_id, rnet_u32 *load_tick,
+                                  rnet_u32 *digest_master, rnet_u32 *digest_a, rnet_u32 *digest_b,
+                                  rnet_u32 *digest_c);
+
+int rnet_session_send_rb_post(RNetSession *s, rnet_u32 epoch_id, rnet_u32 target_tick,
+                              rnet_u32 digest_master, rnet_u32 input_digest, rnet_u8 match);
+int rnet_session_take_rb_post(RNetSession *s, rnet_u32 *epoch_id, rnet_u32 *target_tick,
+                              rnet_u32 *digest_master, rnet_u32 *input_digest, rnet_u8 *match);
+
+int rnet_session_send_rb_resolved(RNetSession *s, rnet_u32 resolved_through);
+int rnet_session_take_rb_resolved(RNetSession *s, rnet_u32 *resolved_through);
 
 #ifdef __cplusplus
 }
