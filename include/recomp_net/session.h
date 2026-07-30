@@ -194,6 +194,29 @@ void rnet_session_prime_delay_inputs(RNetSession *s, const rnet_u8 *bytes, rnet_
  * while savestate_pending so the restore can execute. */
 void rnet_session_set_input_send_suppress(RNetSession *s, int suppress);
 
+/*
+ * Rollback FRAME_COMMIT helpers (RNET_PKT_RB_FRAME_COMMIT). Delay-sync peers
+ * ignore these opcodes. Hosts call send after each sim tick with their master
+ * state digest; pump stores the latest peer commit for take_*.
+ */
+int rnet_session_send_rb_frame_commit(RNetSession *s, rnet_u32 through_tick,
+                                      rnet_u32 state_hash);
+/* 1 if a peer FRAME_COMMIT is pending; copies and clears it. */
+int rnet_session_take_rb_frame_commit(RNetSession *s, rnet_u32 *through_tick,
+                                      rnet_u32 *state_hash);
+
+/*
+ * Rollback helpers over the delay-sync tip rings (no try_admit / confirm).
+ * prepare_local_tip: sample+store local tip for sim_tick+D and emit INPUT.
+ * peek_remote_input: non-destructive read of a remote ring row (wire tick).
+ */
+int rnet_session_prepare_local_tip(RNetSession *s, rnet_u32 sim_tick);
+/* Non-destructive ring peek (local or remote) at a wire tick. */
+int rnet_session_peek_input(const RNetSession *s, int slot, rnet_u32 wire_tick,
+                            RNetInputSample *out);
+int rnet_session_peek_remote_input(const RNetSession *s, int slot, rnet_u32 wire_tick,
+                                   RNetInputSample *out);
+
 #ifdef __cplusplus
 }
 #endif

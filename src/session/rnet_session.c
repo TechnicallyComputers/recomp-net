@@ -123,6 +123,13 @@ struct RNetSession
     /* ICE TURN auto-fallback timers (monotonic ms). */
     rnet_u64 ice_attempt_ms;
     rnet_u64 ice_completed_ms;
+    /* Peer RB_FRAME_COMMIT queue (host drains via take_*). */
+#define RNET_RB_FC_QUEUE 64
+    rnet_u32 rb_fc_tick[RNET_RB_FC_QUEUE];
+    rnet_u32 rb_fc_hash[RNET_RB_FC_QUEUE];
+    int rb_fc_q_head; /* next write */
+    int rb_fc_q_tail; /* next read */
+    int rb_fc_q_count;
 };
 
 static rnet_u64 session_now(RNetSession *s)
@@ -445,6 +452,35 @@ static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
         break;
     case RNET_PKT_STATE_PROBE_REPLY:
         state_on_probe_reply(s, pkt);
+        break;
+    case RNET_PKT_RB_FRAME_COMMIT:
+        if (pkt->local_slot != s->cfg.local_slot)
+        {
+            if (s->rb_fc_q_count < RNET_RB_FC_QUEUE)
+            {
+                s->rb_fc_tick[s->rb_fc_q_head] = pkt->rb_through_tick;
+                s->rb_fc_hash[s->rb_fc_q_head] = pkt->rb_state_hash;
+                s->rb_fc_q_head = (s->rb_fc_q_head + 1) % RNET_RB_FC_QUEUE;
+                s->rb_fc_q_count++;
+            }
+            else
+            {
+                /* Drop oldest so the watermark can still track the tip. */
+                s->rb_fc_q_tail = (s->rb_fc_q_tail + 1) % RNET_RB_FC_QUEUE;
+                s->rb_fc_q_count--;
+                s->rb_fc_tick[s->rb_fc_q_head] = pkt->rb_through_tick;
+                s->rb_fc_hash[s->rb_fc_q_head] = pkt->rb_state_hash;
+                s->rb_fc_q_head = (s->rb_fc_q_head + 1) % RNET_RB_FC_QUEUE;
+                s->rb_fc_q_count++;
+            }
+        }
+        break;
+    case RNET_PKT_RB_SYNC:
+    case RNET_PKT_RB_SEAL_ROWS:
+    case RNET_PKT_RB_BASELINE:
+    case RNET_PKT_RB_POST:
+    case RNET_PKT_RB_RESOLVED:
+        /* Reserved for MotK/host rollback episode wiring; ignore for now. */
         break;
     default:
         break;
@@ -2317,4 +2353,101 @@ void rnet_session_state_finish(RNetSession *s, int hard_resync)
     }
     state_clear(s);
     s->state_finished_xfer_id = finished_xfer_id;
+}
+
+int rnet_session_send_rb_frame_commit(RNetSession *s, rnet_u32 through_tick,
+                                      rnet_u32 state_hash)
+{
+    rnet_u8 buf[RNET_MAX_PACKET];
+    int n;
+    if (s == NULL || s->phase != RNET_PHASE_RUNNING)
+    {
+        return -1;
+    }
+    n = rnet_proto_encode_rb_frame_commit(buf, sizeof(buf), s->cfg.protocol_magic,
+                                          s->cfg.session_id, s->cfg.local_slot,
+                                          through_tick, state_hash);
+    if (n <= 0)
+    {
+        return -1;
+    }
+    send_raw(s, buf, n);
+    return 0;
+}
+
+int rnet_session_take_rb_frame_commit(RNetSession *s, rnet_u32 *through_tick,
+                                      rnet_u32 *state_hash)
+{
+    if (s == NULL || s->rb_fc_q_count <= 0)
+    {
+        return 0;
+    }
+    if (through_tick)
+    {
+        *through_tick = s->rb_fc_tick[s->rb_fc_q_tail];
+    }
+    if (state_hash)
+    {
+        *state_hash = s->rb_fc_hash[s->rb_fc_q_tail];
+    }
+    s->rb_fc_q_tail = (s->rb_fc_q_tail + 1) % RNET_RB_FC_QUEUE;
+    s->rb_fc_q_count--;
+    return 1;
+}
+
+int rnet_session_prepare_local_tip(RNetSession *s, rnet_u32 sim_tick)
+{
+    rnet_u32 sample_wire;
+    RNetInputSample local_future;
+
+    if (s == NULL || s->phase != RNET_PHASE_RUNNING)
+    {
+        return 0;
+    }
+    if (sim_tick != s->sim_tick)
+    {
+        return 0;
+    }
+    sample_wire = rnet_wire_tick_from_sim(sim_tick, s->delay);
+    if (!rnet_ring_get(&s->local_ring, sample_wire, &local_future))
+    {
+        memset(&local_future, 0, sizeof(local_future));
+        if (s->host.sample_local)
+        {
+            s->host.sample_local(sim_tick, &local_future, s->host.ctx);
+        }
+        local_future.tick = sample_wire;
+        local_future.valid = 1;
+        if (local_future.size > RNET_INPUT_MAX)
+        {
+            local_future.size = RNET_INPUT_MAX;
+        }
+        rnet_ring_store(&s->local_ring, &local_future);
+    }
+    send_input_bundle(s);
+    return 1;
+}
+
+int rnet_session_peek_input(const RNetSession *s, int slot, rnet_u32 wire_tick,
+                            RNetInputSample *out)
+{
+    if (s == NULL || out == NULL || slot < 0 || slot >= (int)s->cfg.slot_count)
+    {
+        return 0;
+    }
+    if (slot == (int)s->cfg.local_slot)
+    {
+        return rnet_ring_get(&s->local_ring, wire_tick, out);
+    }
+    return rnet_ring_get(&s->remote_rings[slot], wire_tick, out);
+}
+
+int rnet_session_peek_remote_input(const RNetSession *s, int slot, rnet_u32 wire_tick,
+                                   RNetInputSample *out)
+{
+    if (s == NULL || slot == (int)s->cfg.local_slot)
+    {
+        return 0;
+    }
+    return rnet_session_peek_input(s, slot, wire_tick, out);
 }
