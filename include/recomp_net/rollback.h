@@ -31,6 +31,19 @@ extern "C" {
  * frame-commit validation cadence + slack used by the reference host. */
 #define RNET_RB_SEAL_MAX_SPAN 128u
 #define RNET_RB_MAX_SLOTS 8
+/* Tip episode: target - load at or below this may skip the ready-ACK RTT
+ * (digests still compared). Sized for tip-extend re-replay after TipHold. */
+#define RNET_RB_LIGHT_TIP_MAX_DEPTH 16u
+/* Live quiet window after POST match (TipHold) so a physical press→release
+ * (typically 6–15 ticks later) tip-extends the same episode instead of a
+ * second seal/baseline handshake. Also the cap for suggest_target slack. */
+#define RNET_RB_TIP_RUNWAY_DEFAULT 12u
+/* Initial seal headroom past live tip when opening an episode. Kept small —
+ * TipHold covers the release; burning a long runway in catch-up finishes
+ * before the finger lifts. */
+#define RNET_RB_TIP_SEAL_SLACK_DEFAULT 2u
+/* corr.flags */
+#define RNET_RB_CORR_LIGHT_TIP 0x01u
 
 typedef enum RNetRbPhase
 {
@@ -39,6 +52,8 @@ typedef enum RNetRbPhase
     nRNetRbPhaseAwaitingBaseline,
     nRNetRbPhaseReplay,
     nRNetRbPhaseVerify,
+    /* POST matched: seals stay open for tip-extend while host runs Live. */
+    nRNetRbPhaseTipHold,
     nRNetRbPhaseCommit,
     nRNetRbPhaseAbort
 } RNetRbPhase;
@@ -67,6 +82,7 @@ typedef struct RNetRbCorrection
     int32_t slot;            /* corrected player slot (-1 = whole state) */
     uint8_t initiator;       /* 1 when this host started the episode */
     uint8_t from_peer_notify;
+    uint8_t flags;           /* RNET_RB_CORR_LIGHT_TIP, … */
 } RNetRbCorrection;
 
 /* Opaque per-slot input row the library seals and replays. The library never
@@ -133,6 +149,13 @@ typedef struct RNetRbConfig
     /* Active seats in this match (1..RNET_RB_MAX_SLOTS). Peer-seal completion
      * only waits on slots in [0, slot_count) excluding local_slot. 0 => 2. */
     uint32_t slot_count;
+    /* TipHold quiet window after POST match (0 = finalize immediately;
+     * RNET_RB_TIP_RUNWAY_DEFAULT recommended for digital hosts). Also the
+     * maximum slack suggest_target may add (capped by tip_seal_slack). */
+    uint32_t tip_runway;
+    /* Initial seal headroom past max(sim, mismatch). 0 → TIP_SEAL_SLACK_DEFAULT
+     * when tip_runway > 0; set UINT32_MAX to force 0 slack. */
+    uint32_t tip_seal_slack;
 } RNetRbConfig;
 
 /* Lifecycle. */
@@ -144,12 +167,21 @@ void rnet_rb_session_reset(RNetRbSession *s);
 RNetRbPhase rnet_rb_get_phase(const RNetRbSession *s);
 uint8_t rnet_rb_is_active(const RNetRbSession *s);
 uint8_t rnet_rb_is_resimulating(const RNetRbSession *s);
+uint8_t rnet_rb_is_tip_holding(const RNetRbSession *s);
+uint32_t rnet_rb_get_tip_runway(const RNetRbSession *s);
 uint32_t rnet_rb_get_epoch_id(const RNetRbSession *s);
 uint32_t rnet_rb_get_mismatch_tick(const RNetRbSession *s);
 uint32_t rnet_rb_get_load_tick(const RNetRbSession *s);
 uint32_t rnet_rb_get_target_tick(const RNetRbSession *s);
 int32_t rnet_rb_get_corrected_slot(const RNetRbSession *s);
 uint8_t rnet_rb_is_from_peer_notify(const RNetRbSession *s);
+uint8_t rnet_rb_get_corr_flags(const RNetRbSession *s);
+
+/* 1 when (target - load) <= LIGHT_TIP_MAX_DEPTH and load is at/after the
+ * shared frontier (resolved_through). Hosts may skip ready-ACK RTT. */
+uint8_t rnet_rb_is_light_tip_candidate(uint32_t load_tick, uint32_t target_tick,
+                                       uint32_t resolved_through);
+uint8_t rnet_rb_recommend_light_tip(const RNetRbSession *s);
 
 /*
  * Correction entry points. Host calls begin_episode when it (or a symmetric
@@ -159,6 +191,35 @@ uint8_t rnet_rb_is_from_peer_notify(const RNetRbSession *s);
  */
 void rnet_rb_begin_episode(RNetRbSession *s, const RNetRbCorrection *corr);
 void rnet_rb_set_phase(RNetRbSession *s, RNetRbPhase phase);
+
+/*
+ * Tip-extend / edge coalesce: grow target_tick and append seal rows for
+ * (old_target, new_target]. Allowed in SealInputs / AwaitingBaseline /
+ * Replay / Verify / TipHold. Verify and TipHold drop back to Replay so the
+ * host can keep resimming. Returns 1 on success (including already-at-target).
+ *
+ * Also refreshes local-authority sealed rows in the new range from
+ * get_input_row (host must promote late wire into history first).
+ */
+uint8_t rnet_rb_extend_target(RNetRbSession *s, uint32_t new_target);
+
+/* Re-sample sealed rows for one slot from host history over [from, to]
+ * inclusive (clamped to the sealed span). Used after promoting late wire
+ * for a tick already inside the current target (press sealed, release
+ * arrives before tip). */
+uint8_t rnet_rb_resign_slot_range(RNetRbSession *s, int32_t slot, uint32_t from_tick,
+                                  uint32_t to_tick);
+
+/* Suggested target = max(sim_tip, mismatch) + tip_seal_slack (small;
+ * TipHold covers physical release coalesce). */
+uint32_t rnet_rb_suggest_target(const RNetRbSession *s, uint32_t mismatch_tick,
+                                uint32_t sim_tip);
+
+/* After POST digests match: advance resolved_through, keep seals, enter
+ * TipHold so the host can run Live while late edges tip-extend. Returns 1
+ * on success. Host calls session_reset (or on_post_match→Commit) when the
+ * tip_runway quiet window expires. */
+uint8_t rnet_rb_enter_tip_hold(RNetRbSession *s);
 
 /* Stick-replace decision over a published vs authoritative wire row; thin
  * wrapper so hosts can resolve rewind-vs-promote with the shared contract and

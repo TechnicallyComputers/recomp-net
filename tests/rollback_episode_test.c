@@ -195,6 +195,77 @@ int main(void)
     expect_true(rnet_rb_get_phase(s) == nRNetRbPhaseLive, "reset to live");
     expect_true(!rnet_rb_inputs_sealed(s), "reset clears seal");
 
+    /* --- Tip-extend + light-tip --- */
+    cfg.tip_runway = RNET_RB_TIP_RUNWAY_DEFAULT;
+    rnet_rb_destroy(s);
+    s = rnet_rb_create(&cfg, &vt);
+    expect_true(s != NULL, "recreate with tip_runway");
+    expect_true(rnet_rb_suggest_target(s, 100u, 102u) == 106u,
+                "suggest_target = max(sim,mismatch)+runway");
+    expect_true(rnet_rb_is_light_tip_candidate(100u, 104u, 100u),
+                "light tip when load at frontier and depth<=8");
+    expect_true(!rnet_rb_is_light_tip_candidate(80u, 104u, 100u),
+                "not light tip when load behind frontier");
+
+    memset(&corr, 0, sizeof(corr));
+    corr.epoch_id = 8u;
+    corr.mismatch_tick = 100u;
+    corr.load_tick = 100u;
+    corr.target_tick = 102u;
+    corr.slot = 1;
+    corr.initiator = 1u;
+    rnet_rb_begin_episode(s, &corr);
+    expect_true((rnet_rb_get_corr_flags(s) & RNET_RB_CORR_LIGHT_TIP) != 0u,
+                "begin sets LIGHT_TIP flag");
+    rnet_rb_seal_inputs(s, corr.load_tick, corr.target_tick, corr.slot);
+    expect_true(rnet_rb_get_seal_span(s) == 3u, "seal 100..102");
+
+    /* Peer completes original span. */
+    {
+        uint32_t i;
+        for (i = 0u; i < 3u; ++i)
+        {
+            rows[i].tick = 100u + i;
+            rows[i].buttons = 0x200u;
+            rows[i].is_valid = 1u;
+        }
+    }
+    expect_true(rnet_rb_apply_peer_seal_rows(s, 8u, 100u, 102u, 1, 0u, rows, 3u),
+                "peer rows for original tip");
+    expect_true(rnet_rb_all_peer_seal_rows_complete(s), "sealed before extend");
+
+    rnet_rb_set_phase(s, nRNetRbPhaseReplay);
+    expect_true(rnet_rb_extend_target(s, 105u), "extend target 102→105");
+    expect_true(rnet_rb_get_target_tick(s) == 105u, "target grown");
+    expect_true(rnet_rb_get_seal_span(s) == 6u, "span 100..105");
+    expect_true(rnet_rb_tick_in_sealed_span(s, 105u), "new tip in span");
+    expect_true(!rnet_rb_all_peer_seal_rows_complete(s),
+                "extend clears peer completeness for new offsets");
+
+    /* Peer tip-extend via apply with higher target + delta rows. */
+    {
+        uint32_t i;
+        for (i = 0u; i < 3u; ++i)
+        {
+            rows[i].tick = 103u + i;
+            rows[i].buttons = 0x201u;
+            rows[i].is_valid = 1u;
+        }
+    }
+    expect_true(rnet_rb_apply_peer_seal_rows(s, 8u, 100u, 105u, 1, 3u, rows, 3u),
+                "peer delta rows auto-extend path");
+    expect_true(rnet_rb_all_peer_seal_rows_complete(s), "complete after delta");
+    expect_true(rnet_rb_get_sealed_frame(s, 1, 104u, &got) && got.buttons == 0x201u,
+                "extended peer row");
+
+    /* Resign after promote (same target, update buttons). */
+    expect_true(rnet_rb_resign_slot_range(s, 1, 104u, 104u), "resign one tick");
+
+    /* Verify → extend drops back to Replay. */
+    rnet_rb_set_phase(s, nRNetRbPhaseVerify);
+    expect_true(rnet_rb_extend_target(s, 106u), "extend from Verify");
+    expect_true(rnet_rb_get_phase(s) == nRNetRbPhaseReplay, "Verify→Replay on extend");
+
     rnet_rb_destroy(s);
 
     if (g_failures == 0)
