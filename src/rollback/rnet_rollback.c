@@ -84,6 +84,23 @@ RNetRbSession *rnet_rb_create(const RNetRbConfig *cfg, const RNetRollbackVTable 
         free(s);
         return NULL;
     }
+    if (s->cfg.tip_runway > 32u)
+    {
+        s->cfg.tip_runway = 32u;
+    }
+    /* tip_seal_slack: 0 with tip_runway → default slack; UINT32_MAX → force 0. */
+    if (s->cfg.tip_seal_slack == 0u && s->cfg.tip_runway > 0u)
+    {
+        s->cfg.tip_seal_slack = RNET_RB_TIP_SEAL_SLACK_DEFAULT;
+    }
+    else if (s->cfg.tip_seal_slack == 0xffffffffu)
+    {
+        s->cfg.tip_seal_slack = 0u;
+    }
+    if (s->cfg.tip_seal_slack > 8u)
+    {
+        s->cfg.tip_seal_slack = 8u;
+    }
     s->sealed = (RNetRbFrame *)calloc((size_t)s->cfg.seal_max_span * RNET_RB_MAX_SLOTS,
                                       sizeof(RNetRbFrame));
     if (s->sealed == NULL)
@@ -107,10 +124,14 @@ void rnet_rb_destroy(RNetRbSession *s)
 
 void rnet_rb_session_reset(RNetRbSession *s)
 {
+    uint32_t keep_resolved;
     if (s == NULL)
     {
         return;
     }
+    /* resolved_through is a session watermark across episodes — keep it so
+     * light-tip / tip-extend policy still sees the shared frontier. */
+    keep_resolved = s->resolved_through;
     s->phase = nRNetRbPhaseLive;
     memset(&s->corr, 0, sizeof(s->corr));
     s->corr.slot = -1;
@@ -118,7 +139,7 @@ void rnet_rb_session_reset(RNetRbSession *s)
     s->seal_base_tick = 0u;
     s->inputs_sealed = 0u;
     memset(s->peer_seal_mask, 0, sizeof(s->peer_seal_mask));
-    s->resolved_through = 0u;
+    s->resolved_through = keep_resolved;
     s->event_head = 0u;
     s->event_tail = 0u;
 }
@@ -145,6 +166,16 @@ uint8_t rnet_rb_is_resimulating(const RNetRbSession *s)
                : 0u;
 }
 
+uint8_t rnet_rb_is_tip_holding(const RNetRbSession *s)
+{
+    return ((s != NULL) && (s->phase == nRNetRbPhaseTipHold)) ? 1u : 0u;
+}
+
+uint32_t rnet_rb_get_tip_runway(const RNetRbSession *s)
+{
+    return (s != NULL) ? s->cfg.tip_runway : 0u;
+}
+
 uint32_t rnet_rb_get_epoch_id(const RNetRbSession *s) { return (s != NULL) ? s->corr.epoch_id : 0u; }
 uint32_t rnet_rb_get_mismatch_tick(const RNetRbSession *s) { return (s != NULL) ? s->corr.mismatch_tick : 0u; }
 uint32_t rnet_rb_get_load_tick(const RNetRbSession *s) { return (s != NULL) ? s->corr.load_tick : 0u; }
@@ -154,6 +185,60 @@ uint8_t rnet_rb_is_from_peer_notify(const RNetRbSession *s)
 {
     return ((s != NULL) && (s->corr.from_peer_notify != 0u)) ? 1u : 0u;
 }
+uint8_t rnet_rb_get_corr_flags(const RNetRbSession *s)
+{
+    return (s != NULL) ? s->corr.flags : 0u;
+}
+
+uint8_t rnet_rb_is_light_tip_candidate(uint32_t load_tick, uint32_t target_tick,
+                                       uint32_t resolved_through)
+{
+    uint32_t depth;
+    if (target_tick < load_tick)
+    {
+        return 0u;
+    }
+    depth = target_tick - load_tick;
+    if (depth > RNET_RB_LIGHT_TIP_MAX_DEPTH)
+    {
+        return 0u;
+    }
+    /* Tip-aligned: load is at or after the last agreed frontier (or first
+     * episode with no frontier yet and depth still tiny). */
+    if (resolved_through == 0u)
+    {
+        return (depth <= 2u) ? 1u : 0u;
+    }
+    return (load_tick >= resolved_through) ? 1u : 0u;
+}
+
+uint8_t rnet_rb_recommend_light_tip(const RNetRbSession *s)
+{
+    if (s == NULL)
+    {
+        return 0u;
+    }
+    if ((s->corr.flags & RNET_RB_CORR_LIGHT_TIP) != 0u)
+    {
+        return 1u;
+    }
+    return rnet_rb_is_light_tip_candidate(s->corr.load_tick, s->corr.target_tick,
+                                          s->resolved_through);
+}
+
+uint32_t rnet_rb_suggest_target(const RNetRbSession *s, uint32_t mismatch_tick,
+                                uint32_t sim_tip)
+{
+    uint32_t target;
+    uint32_t slack;
+    target = (sim_tip > mismatch_tick) ? sim_tip : mismatch_tick;
+    slack = (s != NULL) ? s->cfg.tip_seal_slack : 0u;
+    if (slack > 0u && target <= (0xffffffffu - slack))
+    {
+        target += slack;
+    }
+    return target;
+}
 
 void rnet_rb_begin_episode(RNetRbSession *s, const RNetRbCorrection *corr)
 {
@@ -162,10 +247,140 @@ void rnet_rb_begin_episode(RNetRbSession *s, const RNetRbCorrection *corr)
         return;
     }
     s->corr = *corr;
+    if (rnet_rb_is_light_tip_candidate(s->corr.load_tick, s->corr.target_tick,
+                                       s->resolved_through) != 0u)
+    {
+        s->corr.flags = (uint8_t)(s->corr.flags | RNET_RB_CORR_LIGHT_TIP);
+    }
     s->inputs_sealed = 0u;
     s->sealed_span = 0u;
     memset(s->peer_seal_mask, 0, sizeof(s->peer_seal_mask));
     s->phase = nRNetRbPhaseSealInputs;
+}
+
+static void rnet_rb_fill_local_row(RNetRbSession *s, uint32_t tick, uint32_t offset,
+                                   uint32_t slot)
+{
+    RNetRbFrame *dst = &s->sealed[rnet_rb_seal_index(offset, slot)];
+    memset(dst, 0, sizeof(*dst));
+    dst->tick = tick;
+    if (slot == s->cfg.local_slot)
+    {
+        RNetRbFrame row;
+        if (s->vt.get_input_row(s->vt.ctx, (int32_t)slot, tick, &row) != 0u)
+        {
+            *dst = row;
+            dst->tick = tick;
+        }
+    }
+}
+
+uint8_t rnet_rb_extend_target(RNetRbSession *s, uint32_t new_target)
+{
+    uint32_t old_target;
+    uint32_t begin;
+    uint32_t new_span;
+    uint32_t offset;
+    uint32_t slot;
+
+    if ((s == NULL) || (s->inputs_sealed == 0u))
+    {
+        return 0u;
+    }
+    if ((s->phase == nRNetRbPhaseLive) || (s->phase == nRNetRbPhaseCommit) ||
+        (s->phase == nRNetRbPhaseAbort))
+    {
+        return 0u;
+    }
+    old_target = s->corr.target_tick;
+    if (new_target <= old_target)
+    {
+        if ((s->phase == nRNetRbPhaseVerify) || (s->phase == nRNetRbPhaseTipHold))
+        {
+            s->phase = nRNetRbPhaseReplay;
+        }
+        return 1u;
+    }
+    begin = s->seal_base_tick;
+    if (new_target < begin)
+    {
+        return 0u;
+    }
+    new_span = new_target - begin + 1u;
+    if (new_span > s->cfg.seal_max_span)
+    {
+        return 0u;
+    }
+    /* Peer-seal bitmask is uint64_t — refuse extends that would break it. */
+    if (new_span > 64u)
+    {
+        return 0u;
+    }
+    for (offset = s->sealed_span; offset < new_span; ++offset)
+    {
+        uint32_t tick = begin + offset;
+        for (slot = 0u; slot < RNET_RB_MAX_SLOTS; ++slot)
+        {
+            rnet_rb_fill_local_row(s, tick, offset, slot);
+        }
+        /* New offsets need peer rows again. */
+    }
+    s->sealed_span = new_span;
+    s->corr.target_tick = new_target;
+    if ((s->phase == nRNetRbPhaseVerify) || (s->phase == nRNetRbPhaseTipHold))
+    {
+        s->phase = nRNetRbPhaseReplay;
+    }
+    return 1u;
+}
+
+uint8_t rnet_rb_enter_tip_hold(RNetRbSession *s)
+{
+    if ((s == NULL) || (s->phase != nRNetRbPhaseVerify) || (s->inputs_sealed == 0u))
+    {
+        return 0u;
+    }
+    rnet_rb_commit_promote_sealed(s);
+    s->phase = nRNetRbPhaseTipHold;
+    return 1u;
+}
+
+uint8_t rnet_rb_resign_slot_range(RNetRbSession *s, int32_t slot, uint32_t from_tick,
+                                  uint32_t to_tick)
+{
+    uint32_t tick;
+    if ((s == NULL) || (s->inputs_sealed == 0u) || (rnet_rb_slot_valid(slot) == 0u))
+    {
+        return 0u;
+    }
+    if (to_tick < from_tick)
+    {
+        return 0u;
+    }
+    for (tick = from_tick; tick <= to_tick; ++tick)
+    {
+        uint32_t offset;
+        RNetRbFrame row;
+        RNetRbFrame *dst;
+        if (rnet_rb_tick_in_sealed_span(s, tick) == 0u)
+        {
+            continue;
+        }
+        offset = tick - s->seal_base_tick;
+        dst = &s->sealed[rnet_rb_seal_index(offset, (uint32_t)slot)];
+        if (s->vt.get_input_row(s->vt.ctx, slot, tick, &row) == 0u)
+        {
+            continue;
+        }
+        *dst = row;
+        dst->tick = tick;
+        /* Host promoted wire into history — this offset is authoritative. */
+        if (row.is_valid != 0u)
+        {
+            s->peer_seal_mask[(uint32_t)slot] |= (1ull << offset);
+        }
+    }
+    return 1u;
 }
 
 void rnet_rb_set_phase(RNetRbSession *s, RNetRbPhase phase)
@@ -226,28 +441,23 @@ void rnet_rb_seal_inputs(RNetRbSession *s, uint32_t begin_tick, uint32_t target_
     /* Seal local-authority rows from the host's input history; peer-authority
      * slots arrive via apply_peer_seal_rows. begin_tick is typically load_tick
      * so every Replay quantum has a sealed row. */
+    s->seal_base_tick = begin_tick;
+    s->sealed_span = 0u;
     for (offset = 0u; offset < span; ++offset)
     {
         uint32_t tick = begin_tick + offset;
         for (slot = 0u; slot < RNET_RB_MAX_SLOTS; ++slot)
         {
-            RNetRbFrame *dst = &s->sealed[rnet_rb_seal_index(offset, slot)];
-            memset(dst, 0, sizeof(*dst));
-            dst->tick = tick;
-            if (slot == s->cfg.local_slot)
-            {
-                RNetRbFrame row;
-                if (s->vt.get_input_row(s->vt.ctx, (int32_t)slot, tick, &row) != 0u)
-                {
-                    *dst = row;
-                    dst->tick = tick;
-                }
-            }
+            rnet_rb_fill_local_row(s, tick, offset, slot);
         }
     }
-    s->seal_base_tick = begin_tick;
     s->sealed_span = span;
     s->inputs_sealed = 1u;
+    /* Keep corr.target in sync with the sealed tip. */
+    if (target_tick >= begin_tick)
+    {
+        s->corr.target_tick = begin_tick + span - 1u;
+    }
 }
 
 uint8_t rnet_rb_inputs_sealed(const RNetRbSession *s)
@@ -301,11 +511,22 @@ uint8_t rnet_rb_apply_peer_seal_rows(RNetRbSession *s, uint32_t epoch_id, uint32
     {
         return 0u;
     }
-    /* Tuple compatibility: wire "mismatch" field carries seal_base_tick. */
-    if ((epoch_id != s->corr.epoch_id) || (mismatch_tick != s->seal_base_tick) ||
-        (target_tick != s->corr.target_tick))
+    /* Tuple compatibility: wire "mismatch" field carries seal_base_tick.
+     * Tip-extend: peer may advertise a higher target — grow to match. */
+    if ((epoch_id != s->corr.epoch_id) || (mismatch_tick != s->seal_base_tick))
     {
         return 0u;
+    }
+    if (target_tick < s->corr.target_tick)
+    {
+        return 0u; /* stale */
+    }
+    if (target_tick > s->corr.target_tick)
+    {
+        if (rnet_rb_extend_target(s, target_tick) == 0u)
+        {
+            return 0u;
+        }
     }
     for (i = 0u; i < row_count; ++i)
     {

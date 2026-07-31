@@ -40,6 +40,33 @@ Replay → Verify → Commit|Abort`), the correction tuple, the sealed input tab
 and the resolved-through (shared frontier) watermark. The host owns snapshots,
 the deterministic sim step, state digests, and the wire transport.
 
+### Tip-extend / edge coalesce
+
+`rnet_rb_extend_target` grows `target_tick` and appends seal rows so a late
+wire edge (typical digital press then release) stays in the **same** episode
+instead of a second seal/baseline handshake. `rnet_rb_resign_slot_range`
+refreshes sealed rows after the host promotes wire into history.
+`apply_peer_seal_rows` accepts `target >= corr.target` and auto-extends.
+`rnet_rb_suggest_target` adds `cfg.tip_seal_slack` (default 2) past live tip
+when opening an episode; `cfg.tip_runway` (default 12) is the TipHold quiet
+window after POST match, not initial seal headroom. `resolved_through` survives
+`session_reset`.
+
+### TipHold
+
+After POST digests match, `rnet_rb_enter_tip_hold` advances
+`resolved_through`, keeps seals open, and enters `TipHold` while the host
+runs Live. A physical release within `tip_runway` ticks tip-extends the same
+episode (Verify/TipHold → Replay on extend/resign) instead of committing and
+opening a second baseline handshake. The host finalizes with `session_reset`
+when the quiet window expires.
+
+### Light tip
+
+When `(target - load) <= RNET_RB_LIGHT_TIP_MAX_DEPTH` and `load` is at/after
+`resolved_through`, `begin_episode` sets `RNET_RB_CORR_LIGHT_TIP`. Hosts may
+skip the ready-ACK RTT (digests still compared) and shrink baseline bursts.
+
 Required `RNetRollbackVTable` callbacks: `save_state` / `load_state` /
 `advance_sim` / `get_input_row` (+ `state_digest`, `hash_confirm_through`).
 Host stick gates ride through `stick_gates` and feed
