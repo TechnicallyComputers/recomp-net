@@ -197,15 +197,68 @@ int main(void)
 
     /* --- Tip-extend + light-tip --- */
     cfg.tip_runway = RNET_RB_TIP_RUNWAY_DEFAULT;
+    cfg.tip_seal_slack = RNET_RB_TIP_SEAL_SLACK_DEFAULT;
     rnet_rb_destroy(s);
     s = rnet_rb_create(&cfg, &vt);
     expect_true(s != NULL, "recreate with tip_runway");
-    expect_true(rnet_rb_suggest_target(s, 100u, 102u) == 106u,
-                "suggest_target = max(sim,mismatch)+runway");
+    expect_true(rnet_rb_suggest_target(s, 100u, 102u) == 104u,
+                "suggest_target = max(sim,mismatch)+tip_seal_slack");
     expect_true(rnet_rb_is_light_tip_candidate(100u, 104u, 100u),
-                "light tip when load at frontier and depth<=8");
+                "light tip when load at frontier and depth<=16");
     expect_true(!rnet_rb_is_light_tip_candidate(80u, 104u, 100u),
                 "not light tip when load behind frontier");
+    expect_true(rnet_rb_get_light_tip_max_depth(s) == RNET_RB_LIGHT_TIP_MAX_DEPTH,
+                "light_tip_max_depth defaults to the library constant when cfg leaves it 0");
+    /* Demote after follow-NACK must pull the session watermark down —
+     * set_peer_convergence only advances, and session_reset keeps the old
+     * value (would otherwise re-poison light-tip / HC on the next pump). */
+    rnet_rb_set_peer_convergence(s, 200u);
+    expect_true(rnet_rb_resolved_through(s) == 200u, "convergence advances");
+    rnet_rb_demote_resolved_through(s, 184u);
+    expect_true(rnet_rb_resolved_through(s) == 184u, "demote pulls watermark down");
+    rnet_rb_demote_resolved_through(s, 190u);
+    expect_true(rnet_rb_resolved_through(s) == 184u,
+                "demote is a no-op when tick >= current");
+    rnet_rb_session_reset(s);
+    expect_true(rnet_rb_resolved_through(s) == 184u,
+                "session_reset preserves the demoted watermark");
+    /* Restore a tip-aligned frontier for the begin/light-tip checks below. */
+    rnet_rb_demote_resolved_through(s, 100u);
+    expect_true(rnet_rb_resolved_through(s) == 100u, "demote to tip for later checks");
+
+    /* A host that widens tip_runway for TipHold coalescing (e.g. MotK's 24)
+     * must widen light_tip_max_depth to match, or coalesced episodes past
+     * the library default of 16 silently lose the light-tip fast path. */
+    expect_true(!rnet_rb_is_light_tip_candidate(100u, 120u, 100u),
+                "plain wrapper still uses the library default (16) — depth 20 is not light");
+    expect_true(!rnet_rb_is_light_tip_candidate_ex(100u, 120u, 100u, 16u),
+                "explicit depth=16 ceiling also rejects depth 20");
+    expect_true(rnet_rb_is_light_tip_candidate_ex(100u, 120u, 100u, 24u),
+                "explicit depth=24 ceiling (matching a widened tip_runway) accepts depth 20");
+    {
+        RNetRbConfig wide_cfg = cfg;
+        RNetRbSession *wide_s;
+        wide_cfg.tip_runway = 24u;
+        wide_cfg.light_tip_max_depth = 24u;
+        wide_s = rnet_rb_create(&wide_cfg, &vt);
+        expect_true(wide_s != NULL, "create session with widened light_tip_max_depth");
+        expect_true(rnet_rb_get_light_tip_max_depth(wide_s) == 24u,
+                    "session reports the configured (non-default) depth ceiling");
+        /* Tip-aligned branch needs resolved_through set (fresh sessions start
+         * at 0, which only allows depth<=2 regardless of the ceiling). */
+        rnet_rb_set_peer_convergence(wide_s, 100u);
+        memset(&corr, 0, sizeof(corr));
+        corr.epoch_id = 1u;
+        corr.mismatch_tick = 120u;
+        corr.load_tick = 100u;
+        corr.target_tick = 120u; /* depth 20: light under 24, not under default 16 */
+        corr.slot = 1;
+        corr.initiator = 1u;
+        rnet_rb_begin_episode(wide_s, &corr);
+        expect_true((rnet_rb_get_corr_flags(wide_s) & RNET_RB_CORR_LIGHT_TIP) != 0u,
+                    "begin_episode honors the session's widened light_tip_max_depth");
+        rnet_rb_destroy(wide_s);
+    }
 
     memset(&corr, 0, sizeof(corr));
     corr.epoch_id = 8u;
@@ -265,6 +318,58 @@ int main(void)
     rnet_rb_set_phase(s, nRNetRbPhaseVerify);
     expect_true(rnet_rb_extend_target(s, 106u), "extend from Verify");
     expect_true(rnet_rb_get_phase(s) == nRNetRbPhaseReplay, "Verify→Replay on extend");
+
+    /* TipHold → extend stays TipHold (host invent-caps Live; rereplay only
+     * when sim already past prior tip). */
+    rnet_rb_set_phase(s, nRNetRbPhaseVerify);
+    expect_true(rnet_rb_enter_tip_hold(s), "enter TipHold for stay-phase check");
+    expect_true(rnet_rb_get_phase(s) == nRNetRbPhaseTipHold, "TipHold after enter");
+    expect_true(rnet_rb_extend_target(s, 108u), "extend while TipHold");
+    expect_true(rnet_rb_get_target_tick(s) == 108u, "TipHold tip grown");
+    expect_true(rnet_rb_get_phase(s) == nRNetRbPhaseTipHold,
+                "TipHold stays TipHold on extend");
+    expect_true(rnet_rb_extend_target(s, 108u), "no-op extend at tip");
+    expect_true(rnet_rb_get_phase(s) == nRNetRbPhaseTipHold,
+                "TipHold stays TipHold on no-op extend");
+
+    rnet_rb_destroy(s);
+
+    /* --- Peer-seal bitmask span cap (TipHold coalesce wall) ---
+     * MotK soak: tip-extend storm grows seal from load until span>64, then
+     * extend fails and the host must tip-hold-commit + open a fresh episode. */
+    {
+        uint32_t load = 100u;
+        uint32_t tip = load + RNET_RB_PEER_SEAL_MASK_BITS - 1u; /* span == 64 */
+        uint32_t past = tip + 1u;                                 /* span == 65 */
+
+        s = rnet_rb_create(&cfg, &vt);
+        expect_true(s != NULL, "recreate for span-cap");
+        memset(&corr, 0, sizeof(corr));
+        corr.epoch_id = 9u;
+        corr.mismatch_tick = load;
+        corr.load_tick = load;
+        corr.target_tick = load + 2u;
+        corr.slot = 1;
+        corr.initiator = 1u;
+        rnet_rb_begin_episode(s, &corr);
+        rnet_rb_seal_inputs(s, corr.load_tick, corr.target_tick, corr.slot);
+        expect_true(rnet_rb_can_extend_target(s, tip), "can extend to span=64");
+        expect_true(rnet_rb_extend_target(s, tip), "extend to peer-seal max");
+        expect_true(rnet_rb_get_seal_span(s) == RNET_RB_PEER_SEAL_MASK_BITS,
+                    "span saturates at 64");
+        expect_true(!rnet_rb_can_extend_target(s, past), "cannot extend past mask");
+        expect_true(!rnet_rb_extend_target(s, past), "extend past mask fails");
+        expect_true(rnet_rb_get_target_tick(s) == tip, "target unchanged on fail");
+
+        /* TipHold path: same refusal (host finalizes tip-hold on 0). */
+        rnet_rb_set_phase(s, nRNetRbPhaseVerify);
+        expect_true(rnet_rb_enter_tip_hold(s), "enter TipHold at span=64");
+        expect_true(rnet_rb_get_phase(s) == nRNetRbPhaseTipHold, "TipHold phase");
+        expect_true(!rnet_rb_can_extend_target(s, past), "TipHold cannot grow past 64");
+        expect_true(!rnet_rb_extend_target(s, past), "TipHold extend past 64 fails");
+        expect_true(rnet_rb_get_phase(s) == nRNetRbPhaseTipHold,
+                    "failed extend leaves TipHold (host commits)");
+    }
 
     rnet_rb_destroy(s);
 

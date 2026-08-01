@@ -30,6 +30,10 @@ extern "C" {
 /* Seal span covers the deepest resim span a host can issue; matches the
  * frame-commit validation cadence + slack used by the reference host. */
 #define RNET_RB_SEAL_MAX_SPAN 128u
+/* Peer-seal completion is a uint64_t bitmask — tip-extend cannot grow the
+ * sealed span past this even when seal_max_span is larger. Hosts must
+ * tip-hold-commit and open a fresh episode when extend would exceed it. */
+#define RNET_RB_PEER_SEAL_MASK_BITS 64u
 #define RNET_RB_MAX_SLOTS 8
 /* Tip episode: target - load at or below this may skip the ready-ACK RTT
  * (digests still compared). Sized for tip-extend re-replay after TipHold. */
@@ -156,6 +160,14 @@ typedef struct RNetRbConfig
     /* Initial seal headroom past max(sim, mismatch). 0 → TIP_SEAL_SLACK_DEFAULT
      * when tip_runway > 0; set UINT32_MAX to force 0 slack. */
     uint32_t tip_seal_slack;
+    /* Max (target - load) depth eligible to skip the ready-ACK RTT (see
+     * rnet_rb_is_light_tip_candidate). 0 → RNET_RB_LIGHT_TIP_MAX_DEPTH.
+     * Hosts that widen tip_runway for TipHold coalescing (a tip-extended
+     * episode's eventual depth can approach tip_runway) should set this to
+     * match tip_runway — otherwise every episode that coalesces past the
+     * library default of 16 silently loses the light-tip fast path and pays
+     * a second RTT it didn't need to. Clamped like tip_runway (max 32). */
+    uint32_t light_tip_max_depth;
 } RNetRbConfig;
 
 /* Lifecycle. */
@@ -169,6 +181,8 @@ uint8_t rnet_rb_is_active(const RNetRbSession *s);
 uint8_t rnet_rb_is_resimulating(const RNetRbSession *s);
 uint8_t rnet_rb_is_tip_holding(const RNetRbSession *s);
 uint32_t rnet_rb_get_tip_runway(const RNetRbSession *s);
+uint32_t rnet_rb_get_tip_seal_slack(const RNetRbSession *s);
+uint32_t rnet_rb_get_light_tip_max_depth(const RNetRbSession *s);
 uint32_t rnet_rb_get_epoch_id(const RNetRbSession *s);
 uint32_t rnet_rb_get_mismatch_tick(const RNetRbSession *s);
 uint32_t rnet_rb_get_load_tick(const RNetRbSession *s);
@@ -177,10 +191,19 @@ int32_t rnet_rb_get_corrected_slot(const RNetRbSession *s);
 uint8_t rnet_rb_is_from_peer_notify(const RNetRbSession *s);
 uint8_t rnet_rb_get_corr_flags(const RNetRbSession *s);
 
-/* 1 when (target - load) <= LIGHT_TIP_MAX_DEPTH and load is at/after the
- * shared frontier (resolved_through). Hosts may skip ready-ACK RTT. */
+/* 1 when (target - load) <= RNET_RB_LIGHT_TIP_MAX_DEPTH and load is at/after
+ * the shared frontier (resolved_through). Hosts may skip ready-ACK RTT.
+ * Convenience wrapper over rnet_rb_is_light_tip_candidate_ex using the
+ * library-wide default depth; a session created with a non-default
+ * cfg.light_tip_max_depth should call the _ex form (or just
+ * rnet_rb_recommend_light_tip, which already does). */
 uint8_t rnet_rb_is_light_tip_candidate(uint32_t load_tick, uint32_t target_tick,
                                        uint32_t resolved_through);
+/* Same as above with an explicit max-depth ceiling — use this (with
+ * rnet_rb_get_light_tip_max_depth(session)) when precomputing the flag for a
+ * session configured with a non-default light_tip_max_depth. */
+uint8_t rnet_rb_is_light_tip_candidate_ex(uint32_t load_tick, uint32_t target_tick,
+                                          uint32_t resolved_through, uint32_t max_depth);
 uint8_t rnet_rb_recommend_light_tip(const RNetRbSession *s);
 
 /*
@@ -195,13 +218,18 @@ void rnet_rb_set_phase(RNetRbSession *s, RNetRbPhase phase);
 /*
  * Tip-extend / edge coalesce: grow target_tick and append seal rows for
  * (old_target, new_target]. Allowed in SealInputs / AwaitingBaseline /
- * Replay / Verify / TipHold. Verify and TipHold drop back to Replay so the
- * host can keep resimming. Returns 1 on success (including already-at-target).
+ * Replay / Verify / TipHold. Verify drops to Replay; TipHold stays TipHold
+ * (host schedules rereplay only when Live already invented past the tip).
+ * Returns 1 on success (including already-at-target).
  *
  * Also refreshes local-authority sealed rows in the new range from
  * get_input_row (host must promote late wire into history first).
  */
 uint8_t rnet_rb_extend_target(RNetRbSession *s, uint32_t new_target);
+
+/* 1 if extend_target(new_target) would succeed (sealed, phase OK, span fits
+ * seal_max_span and RNET_RB_PEER_SEAL_MASK_BITS). Does not mutate. */
+uint8_t rnet_rb_can_extend_target(const RNetRbSession *s, uint32_t new_target);
 
 /* Re-sample sealed rows for one slot from host history over [from, to]
  * inclusive (clamped to the sealed span). Used after promoting late wire
@@ -258,6 +286,11 @@ uint8_t rnet_rb_export_seal_rows_chunk(const RNetRbSession *s, int32_t slot, uin
  * peers). Drives live-sim caps and input-contract hash_confirm_promote. */
 uint32_t rnet_rb_resolved_through(const RNetRbSession *s);
 void rnet_rb_set_peer_convergence(RNetRbSession *s, uint32_t peer_target);
+/* Pull resolved_through down to tick when a follow-NACK / unilateral tip is
+ * refused (tick < current). set_peer_convergence only advances — without a
+ * demote, session_reset keeps a poisoned frontier and the next light-tip /
+ * HC advance reopens the refused load. No-op when tick >= current. */
+void rnet_rb_demote_resolved_through(RNetRbSession *s, uint32_t tick);
 
 /* Episode resolution. Host calls on_post_match / on_post_diverge after the
  * post-replay digest comparison; library commits the sealed rows or deepens /

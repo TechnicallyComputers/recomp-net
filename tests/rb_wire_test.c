@@ -68,6 +68,7 @@ int main(void)
     expect_true(n > 0, "rb_post encodes");
     expect_true(rnet_proto_decode(buf, (size_t)n, MAGIC, &dec) == 0, "rb_post decodes");
     expect_true(dec.type == RNET_PKT_RB_POST, "rb_post type");
+    expect_true(dec.rb_epoch_id == 7u && dec.rb_target_tick == 56u, "rb_post tip binding");
     expect_true(dec.rb_digest_master == 0xDEADu && dec.rb_input_digest == 0xBEEFu && dec.rb_match == 1u,
                 "rb_post digests/match");
 

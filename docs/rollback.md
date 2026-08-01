@@ -44,17 +44,42 @@ the deterministic sim step, state digests, and the wire transport.
 
 `rnet_rb_extend_target` grows `target_tick` and appends seal rows so a late
 wire edge (typical digital press then release) stays in the **same** episode
-instead of a second seal/baseline handshake. `rnet_rb_resign_slot_range`
-refreshes sealed rows after the host promotes wire into history.
-`apply_peer_seal_rows` accepts `target >= corr.target` and auto-extends.
-`rnet_rb_suggest_target` adds `cfg.tip_runway` (default host: 4) past live tip
-when opening an episode. `resolved_through` survives `session_reset`.
+instead of a second seal/baseline handshake. Verify→extend drops to Replay;
+TipHold→extend **stays TipHold** (host invent-caps Live past tip and
+schedules a short rereplay only when sim already invented past the prior
+tip). `rnet_rb_resign_slot_range` refreshes sealed rows after the host
+promotes wire into history. `apply_peer_seal_rows` accepts
+`target >= corr.target` and auto-extends. `rnet_rb_suggest_target` adds
+`cfg.tip_seal_slack` past live tip when opening an episode.
+`resolved_through` survives `session_reset`.
 
 ### Light tip
 
-When `(target - load) <= RNET_RB_LIGHT_TIP_MAX_DEPTH` and `load` is at/after
-`resolved_through`, `begin_episode` sets `RNET_RB_CORR_LIGHT_TIP`. Hosts may
-skip the ready-ACK RTT (digests still compared) and shrink baseline bursts.
+When `(target - load) <= cfg.light_tip_max_depth` (0 → the library default
+`RNET_RB_LIGHT_TIP_MAX_DEPTH`, 16) and `load` is at/after `resolved_through`,
+`begin_episode` sets `RNET_RB_CORR_LIGHT_TIP`. Hosts may skip the ready-ACK
+RTT (digests still compared) and shrink baseline bursts.
+
+Hosts that widen `cfg.tip_runway` for TipHold coalescing (see above) should
+also raise `cfg.light_tip_max_depth` to match — a coalesced episode's
+eventual depth (load..target after one or more `tip_extend` calls) can
+approach `tip_runway`, and if that exceeds the light-tip ceiling the episode
+silently falls back to the full ready-ACK round trip even though nothing
+actually went wrong. A MotK soak with `tip_runway=24` and the untouched
+library default (`16`) lost the light-tip fast path on ~19% of episodes for
+exactly this reason before `light_tip_max_depth` was added and set to match.
+`rnet_rb_is_light_tip_candidate_ex(load, target, resolved_through, max_depth)`
+lets a host precompute the flag with an explicit ceiling before a session
+exists (or before `corr` is populated); `rnet_rb_is_light_tip_candidate` is a
+thin wrapper using the plain library default for hosts that don't override
+`light_tip_max_depth`.
+
+`rnet_rb_demote_resolved_through(s, tick)` pulls the shared frontier down
+when a follow-NACK refuses a unilateral tip. `rnet_rb_set_peer_convergence`
+only advances, and `session_reset` keeps `resolved_through` — without an
+explicit demote the refused tip stays as the library watermark and the next
+light-tip / host HC advance reopens it. Hosts that demote their own agreed
+watermark on NACK should demote the library watermark in the same step.
 
 Required `RNetRollbackVTable` callbacks: `save_state` / `load_state` /
 `advance_sim` / `get_input_row` (+ `state_digest`, `hash_confirm_through`).
