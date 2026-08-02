@@ -51,8 +51,12 @@ packets so in-flight tips cannot first-wins into the new `sim_tick=0` window.
 
 `new_delay : u8`, `pad : u8×3`, `effective_tick : u32`
 
-Optional mid-session delay change. Applied when not past the effective tick
-(or while not running).
+Optional mid-session delay change. Receivers queue the change when
+`effective_tick` is still in the future and commit when `sim_tick` reaches
+that tick (both peers via `rnet_session_advance` / `set_sim_tick`). Applied
+immediately when already past `effective_tick` or while not RUNNING.
+`rnet_session_request_delay_change` schedules + emits; MotK uses this for
+always-on adaptive delay bumps after sustained prediction-runway freezes.
 
 ### INPUT_CONFIRM (6)
 

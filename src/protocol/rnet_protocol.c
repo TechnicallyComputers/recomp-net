@@ -319,7 +319,7 @@ int rnet_proto_encode_state_probe_reply(rnet_u8 *out, size_t cap, rnet_u32 magic
 
 int rnet_proto_encode_rb_sync(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
                               rnet_u32 epoch_id, rnet_u32 mismatch_tick, rnet_u32 load_tick, rnet_u32 target_tick,
-                              rnet_u8 corrected_slot, rnet_u8 initiator)
+                              rnet_u8 corrected_slot, rnet_u8 initiator, rnet_u8 flags)
 {
     rnet_u8 *c = out;
     if (cap < 36)
@@ -332,7 +332,7 @@ int rnet_proto_encode_rb_sync(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32
     *c++ = local_slot;
     *c++ = corrected_slot;
     *c++ = initiator;
-    *c++ = 0;
+    *c++ = flags;
     write_u32(&c, epoch_id);
     write_u32(&c, mismatch_tick);
     write_u32(&c, load_tick);
@@ -677,7 +677,7 @@ int rnet_proto_decode(const rnet_u8 *data, size_t len, rnet_u32 expect_magic, RN
         out->local_slot = *c++;
         out->rb_corrected_slot = *c++;
         out->rb_initiator = *c++;
-        (void)*c++;
+        out->rb_flags = *c++;
         out->rb_epoch_id = read_u32(&c);
         out->rb_mismatch_tick = read_u32(&c);
         out->rb_load_tick = read_u32(&c);

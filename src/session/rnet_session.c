@@ -41,6 +41,11 @@ struct RNetSession
     rnet_u8 local_ready;
     rnet_u8 start_sent;
     rnet_u8 delay;
+    /* Mid-session DELAY_SYNC: apply when sim_tick reaches effective_tick. */
+    int delay_pending;
+    rnet_u8 delay_pending_value;
+    rnet_u32 delay_pending_effective;
+    rnet_u64 delay_pending_last_tx_ms;
     rnet_u32 sim_tick;
     rnet_u32 highest_remote_ack;
     rnet_u64 last_hello_ms;
@@ -135,7 +140,7 @@ struct RNetSession
 #define RNET_RB_CTRL_QUEUE 8
     struct {
         rnet_u32 epoch_id, mismatch_tick, load_tick, target_tick;
-        rnet_u8 corrected_slot, initiator;
+        rnet_u8 corrected_slot, initiator, flags;
     } rb_sync_q[RNET_RB_CTRL_QUEUE];
     int rb_sync_head, rb_sync_tail, rb_sync_count;
 
@@ -224,6 +229,8 @@ static void note_admit_ok(RNetSession *s)
 
 static void send_raw(RNetSession *s, const rnet_u8 *buf, int len);
 static void send_input_bundle(RNetSession *s);
+static void apply_pending_delay(RNetSession *s);
+static void emit_delay_sync(RNetSession *s, rnet_u8 new_delay, rnet_u32 effective_tick);
 static void seed_delay_prefix(RNetSession *s);
 static void state_clear(RNetSession *s);
 static void state_probe_clear(RNetSession *s);
@@ -434,10 +441,19 @@ static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
         }
         break;
     case RNET_PKT_DELAY_SYNC:
+        /* Immediate when already past effective_tick (or not RUNNING yet).
+         * Otherwise queue so both peers commit on the same sim tick. */
         if (pkt->effective_tick <= s->sim_tick || s->phase != RNET_PHASE_RUNNING)
         {
             s->delay = pkt->new_delay;
             s->cfg.input_delay = pkt->new_delay;
+            s->delay_pending = 0;
+        }
+        else
+        {
+            s->delay_pending = 1;
+            s->delay_pending_value = pkt->new_delay;
+            s->delay_pending_effective = pkt->effective_tick;
         }
         break;
     case RNET_PKT_INPUT_CONFIRM:
@@ -515,6 +531,7 @@ static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
             s->rb_sync_q[s->rb_sync_head].target_tick = pkt->rb_target_tick;
             s->rb_sync_q[s->rb_sync_head].corrected_slot = pkt->rb_corrected_slot;
             s->rb_sync_q[s->rb_sync_head].initiator = pkt->rb_initiator;
+            s->rb_sync_q[s->rb_sync_head].flags = pkt->rb_flags;
             s->rb_sync_head = (s->rb_sync_head + 1) % RNET_RB_CTRL_QUEUE;
             s->rb_sync_count++;
         }
@@ -1693,6 +1710,16 @@ void rnet_session_pump(RNetSession *s)
         }
     }
     send_input_bundle(s);
+    /* Retransmit pending DELAY_SYNC until both peers apply (UDP). */
+    if (s->delay_pending && s->phase == RNET_PHASE_RUNNING)
+    {
+        rnet_u64 now = session_now(s);
+        if (s->delay_pending_last_tx_ms == 0ULL ||
+            now - s->delay_pending_last_tx_ms >= 50ULL)
+        {
+            emit_delay_sync(s, s->delay_pending_value, s->delay_pending_effective);
+        }
+    }
 }
 
 int rnet_session_wait_recv(RNetSession *s, int timeout_ms)
@@ -1921,6 +1948,39 @@ int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick)
 #endif
 }
 
+static void apply_pending_delay(RNetSession *s)
+{
+    if (s == NULL || !s->delay_pending)
+    {
+        return;
+    }
+    if (s->sim_tick < s->delay_pending_effective)
+    {
+        return;
+    }
+    s->delay = s->delay_pending_value;
+    s->cfg.input_delay = s->delay_pending_value;
+    s->delay_pending = 0;
+}
+
+static void emit_delay_sync(RNetSession *s, rnet_u8 new_delay, rnet_u32 effective_tick)
+{
+    rnet_u8 buf[RNET_MAX_PACKET];
+    int len;
+
+    if (s == NULL)
+    {
+        return;
+    }
+    len = rnet_proto_encode_delay_sync(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id,
+                                       new_delay, effective_tick);
+    if (len > 0)
+    {
+        send_raw(s, buf, len);
+        s->delay_pending_last_tx_ms = session_now(s);
+    }
+}
+
 void rnet_session_advance(RNetSession *s)
 {
     if (s == NULL)
@@ -1928,6 +1988,7 @@ void rnet_session_advance(RNetSession *s)
         return;
     }
     s->sim_tick++;
+    apply_pending_delay(s);
 }
 
 int rnet_session_input_desync(const RNetSession *s, rnet_u32 *tick, rnet_u32 *local_hash, rnet_u32 *remote_hash)
@@ -2020,6 +2081,44 @@ void rnet_session_push_signal(RNetSession *s, const RNetSignal *msg)
 rnet_u8 rnet_session_committed_delay(const RNetSession *s)
 {
     return (s != NULL) ? s->delay : 0;
+}
+
+int rnet_session_request_delay_change(RNetSession *s, rnet_u8 new_delay)
+{
+    rnet_u32 effective;
+    rnet_u8 clamped;
+
+    if (s == NULL || s->phase != RNET_PHASE_RUNNING)
+    {
+        return 0;
+    }
+    clamped = new_delay;
+    if (clamped < 2u)
+    {
+        clamped = 2u;
+    }
+    if (clamped > 20u)
+    {
+        clamped = 20u;
+    }
+    if (clamped == s->delay && !s->delay_pending)
+    {
+        return 0;
+    }
+    /* Margin: 2*D + 8 ticks so the packet can land before both peers admit. */
+    effective = s->sim_tick + ((rnet_u32)s->delay * 2u) + 8u;
+    if (s->delay_pending && s->delay_pending_effective > s->sim_tick &&
+        s->delay_pending_value == clamped)
+    {
+        /* Already scheduled — refresh the wire copy. */
+        emit_delay_sync(s, clamped, s->delay_pending_effective);
+        return 1;
+    }
+    s->delay_pending = 1;
+    s->delay_pending_value = clamped;
+    s->delay_pending_effective = effective;
+    emit_delay_sync(s, clamped, effective);
+    return 1;
 }
 
 int rnet_session_local_slot(const RNetSession *s)
@@ -2388,6 +2487,7 @@ void rnet_session_hard_resync(RNetSession *s)
     s->input_epoch = (rnet_u16)(s->input_epoch + 1u);
     /* Keep suppress until prime_delay_inputs — avoids emitting an empty tip. */
     s->input_send_suppress = 1;
+    s->delay_pending = 0;
 }
 
 void rnet_session_set_input_send_suppress(RNetSession *s, int suppress)
@@ -2555,11 +2655,12 @@ void rnet_session_set_sim_tick(RNetSession *s, rnet_u32 sim_tick)
         return;
     }
     s->sim_tick = sim_tick;
+    apply_pending_delay(s);
 }
 
 int rnet_session_send_rb_sync(RNetSession *s, rnet_u32 epoch_id, rnet_u32 mismatch_tick,
                               rnet_u32 load_tick, rnet_u32 target_tick,
-                              rnet_u8 corrected_slot, rnet_u8 initiator)
+                              rnet_u8 corrected_slot, rnet_u8 op, rnet_u8 flags)
 {
     rnet_u8 buf[RNET_MAX_PACKET];
     int n;
@@ -2567,7 +2668,7 @@ int rnet_session_send_rb_sync(RNetSession *s, rnet_u32 epoch_id, rnet_u32 mismat
         return -1;
     n = rnet_proto_encode_rb_sync(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id,
                                   s->cfg.local_slot, epoch_id, mismatch_tick, load_tick,
-                                  target_tick, corrected_slot, initiator);
+                                  target_tick, corrected_slot, op, flags);
     if (n <= 0)
         return -1;
     send_raw(s, buf, n);
@@ -2576,7 +2677,7 @@ int rnet_session_send_rb_sync(RNetSession *s, rnet_u32 epoch_id, rnet_u32 mismat
 
 int rnet_session_take_rb_sync(RNetSession *s, rnet_u32 *epoch_id, rnet_u32 *mismatch_tick,
                               rnet_u32 *load_tick, rnet_u32 *target_tick,
-                              rnet_u8 *corrected_slot, rnet_u8 *initiator)
+                              rnet_u8 *corrected_slot, rnet_u8 *op, rnet_u8 *flags)
 {
     if (s == NULL || s->rb_sync_count <= 0)
         return 0;
@@ -2590,8 +2691,10 @@ int rnet_session_take_rb_sync(RNetSession *s, rnet_u32 *epoch_id, rnet_u32 *mism
         *target_tick = s->rb_sync_q[s->rb_sync_tail].target_tick;
     if (corrected_slot)
         *corrected_slot = s->rb_sync_q[s->rb_sync_tail].corrected_slot;
-    if (initiator)
-        *initiator = s->rb_sync_q[s->rb_sync_tail].initiator;
+    if (op)
+        *op = s->rb_sync_q[s->rb_sync_tail].initiator;
+    if (flags)
+        *flags = s->rb_sync_q[s->rb_sync_tail].flags;
     s->rb_sync_tail = (s->rb_sync_tail + 1) % RNET_RB_CTRL_QUEUE;
     s->rb_sync_count--;
     return 1;

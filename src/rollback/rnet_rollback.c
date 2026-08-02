@@ -243,12 +243,11 @@ uint8_t rnet_rb_recommend_light_tip(const RNetRbSession *s)
     {
         return 0u;
     }
-    if ((s->corr.flags & RNET_RB_CORR_LIGHT_TIP) != 0u)
-    {
-        return 1u;
-    }
-    return rnet_rb_is_light_tip_candidate_ex(s->corr.load_tick, s->corr.target_tick,
-                                             s->resolved_through, s->cfg.light_tip_max_depth);
+    /* Post-begin the classification lives in corr.flags (initiator-decided,
+     * wire-propagated). Never re-derive from the local resolved_through here:
+     * peers' watermarks can differ, and a per-peer re-derivation makes the
+     * baseline burst counts asymmetric. */
+    return ((s->corr.flags & RNET_RB_CORR_LIGHT_TIP) != 0u) ? 1u : 0u;
 }
 
 uint32_t rnet_rb_suggest_target(const RNetRbSession *s, uint32_t mismatch_tick,
@@ -272,7 +271,11 @@ void rnet_rb_begin_episode(RNetRbSession *s, const RNetRbCorrection *corr)
         return;
     }
     s->corr = *corr;
-    if (rnet_rb_is_light_tip_candidate_ex(s->corr.load_tick, s->corr.target_tick,
+    /* Light-tip is initiator-authoritative: followers (from_peer_notify) take
+     * the wire flags verbatim so both peers classify the episode identically
+     * even when their local resolved_through watermarks differ. */
+    if (corr->from_peer_notify == 0u &&
+        rnet_rb_is_light_tip_candidate_ex(s->corr.load_tick, s->corr.target_tick,
                                           s->resolved_through,
                                           s->cfg.light_tip_max_depth) != 0u)
     {
@@ -589,9 +592,23 @@ uint8_t rnet_rb_apply_peer_seal_rows(RNetRbSession *s, uint32_t epoch_id, uint32
         {
             continue;
         }
-        s->sealed[rnet_rb_seal_index(offset, (uint32_t)slot)] = rows[i];
-        s->sealed[rnet_rb_seal_index(offset, (uint32_t)slot)].tick = s->seal_base_tick + offset;
-        s->peer_seal_mask[(uint32_t)slot] |= (1ull << offset);
+        {
+            RNetRbFrame *dst = &s->sealed[rnet_rb_seal_index(offset, (uint32_t)slot)];
+            /* Tip-extend MotK soak: FOLLOW invent-idle sealed their local seat
+             * (Live stalled at invent-cap → hist miss) and overwrote the
+             * initiator's wire-promoted authoritative resign. Never let a
+             * predicted peer row clobber a non-predicted seal; still credit
+             * the mask so SealInputs can complete. */
+            if ((rows[i].is_predicted != 0u) && (dst->is_valid != 0u) &&
+                (dst->is_predicted == 0u))
+            {
+                s->peer_seal_mask[(uint32_t)slot] |= (1ull << offset);
+                continue;
+            }
+            *dst = rows[i];
+            dst->tick = s->seal_base_tick + offset;
+            s->peer_seal_mask[(uint32_t)slot] |= (1ull << offset);
+        }
     }
     return 1u;
 }

@@ -88,6 +88,12 @@ int rnet_session_peer_disconnected(const RNetSession *s, rnet_u64 timeout_ms);
 void rnet_session_push_signal(RNetSession *s, const RNetSignal *msg);
 
 rnet_u8 rnet_session_committed_delay(const RNetSession *s);
+/*
+ * Schedule a mid-session input_delay change at a future sim tick and emit
+ * DELAY_SYNC. Both peers apply when sim_tick reaches effective_tick.
+ * new_delay is clamped to 2..20. Returns 1 on accept, 0 on reject.
+ */
+int rnet_session_request_delay_change(RNetSession *s, rnet_u8 new_delay);
 int rnet_session_local_slot(const RNetSession *s);
 rnet_u32 rnet_session_sim_tick(const RNetSession *s);
 int rnet_session_is_running(const RNetSession *s);
@@ -224,13 +230,38 @@ void rnet_session_set_sim_tick(RNetSession *s, rnet_u32 sim_tick);
 /*
  * Rollback episode wire (opcodes 20–23, 25). MotK drains via take_* after pump.
  * Seal-row take copies up to RNET_RB_SEAL_ROWS_CHUNK_MAX frames.
+ *
+ * RB_SYNC op codes (the wire byte historically called "initiator"):
+ *   NACK  — follower refuses/cannot follow. target_tick carries the
+ *           follower's confirmed frontier (0 = unknown) so the initiator can
+ *           demote its watermark to a mutually provable tick.
+ *   BEGIN — initiator opens or tip-extends an episode.
+ *   ABORT — sender tore its episode down. mismatch_tick carries the shared
+ *           RNET_RB_ABORT_CLASS_* cooldown class, load_tick the sender's
+ *           realign tick (0 = none). Receiver mirrors teardown + cooldown so
+ *           both peers re-arm on the same schedule.
  */
+#define RNET_RB_SYNC_OP_NACK 0u
+#define RNET_RB_SYNC_OP_BEGIN 1u
+#define RNET_RB_SYNC_OP_ABORT 2u
+
+/* RB_SYNC flags (BEGIN): initiator-authoritative episode attributes the
+ * follower must adopt verbatim so both peers run the same episode shape. */
+#define RNET_RB_SYNC_FLAG_LIGHT_TIP 0x01u /* light-tip class (skip ready-ACK RTT) */
+#define RNET_RB_SYNC_FLAG_REREPLAY 0x02u  /* tip-extend requires re-replay from load */
+
+/* Shared cooldown classes carried by ABORT (mismatch_tick field). */
+#define RNET_RB_ABORT_CLASS_REALIGN 0u  /* clean realign heal: no cooldown */
+#define RNET_RB_ABORT_CLASS_ABORT 1u    /* generic episode failure */
+#define RNET_RB_ABORT_CLASS_STORM 2u    /* repeated aborts: long cooldown */
+#define RNET_RB_ABORT_CLASS_NO_SNAP 3u  /* no usable snap: longest cooldown */
+
 int rnet_session_send_rb_sync(RNetSession *s, rnet_u32 epoch_id, rnet_u32 mismatch_tick,
                               rnet_u32 load_tick, rnet_u32 target_tick,
-                              rnet_u8 corrected_slot, rnet_u8 initiator);
+                              rnet_u8 corrected_slot, rnet_u8 op, rnet_u8 flags);
 int rnet_session_take_rb_sync(RNetSession *s, rnet_u32 *epoch_id, rnet_u32 *mismatch_tick,
                               rnet_u32 *load_tick, rnet_u32 *target_tick,
-                              rnet_u8 *corrected_slot, rnet_u8 *initiator);
+                              rnet_u8 *corrected_slot, rnet_u8 *op, rnet_u8 *flags);
 
 int rnet_session_send_rb_seal_rows(RNetSession *s, rnet_u32 epoch_id, rnet_u32 mismatch_tick,
                                    rnet_u32 target_tick, rnet_u8 slot, rnet_u32 row_begin,

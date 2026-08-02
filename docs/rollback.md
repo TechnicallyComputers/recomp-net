@@ -21,12 +21,33 @@ tick derived from `row_begin + index`.
 
 | Opcode | Packet | Payload |
 |--------|--------|---------|
-| 20 | `RB_SYNC` | correction tuple `(epoch, mismatch, load, target, slot, initiator)` |
+| 20 | `RB_SYNC` | correction tuple `(epoch, mismatch, load, target, slot, op, flags)` |
 | 21 | `RB_SEAL_ROWS` | peer-authority sealed rows chunk (tuple + rows) |
 | 22 | `RB_BASELINE` | post-load digests (master + 3 partitions) for the baseline gate |
 | 23 | `RB_POST` | post-replay digests + match flag (commit / deepen / abort) |
 | 24 | `RB_FRAME_COMMIT` | state/master-hash watermark agreement token |
 | 25 | `RB_RESOLVED` | resolved-through / shared frontier advertise |
+
+`RB_SYNC` carries an op code (the byte historically named `initiator`) and a
+flags byte (`recomp_net/session.h`):
+
+- `OP_BEGIN` — open or tip-extend an episode. Flags are
+  initiator-authoritative episode attributes the follower adopts verbatim:
+  `FLAG_LIGHT_TIP` (episode class; keeps baseline burst counts symmetric) and
+  `FLAG_REREPLAY` (tip-extend requires re-replay from load — the follower
+  mirrors the initiator's decision instead of re-deriving from its own tip).
+- `OP_NACK` — follower refuses/cannot follow. The target field carries the
+  follower's confirmed frontier so the initiator demotes its watermark to a
+  mutually provable tick instead of guessing `load-1`.
+- `OP_ABORT` — sender tore its episode down. The mismatch field carries the
+  shared `RNET_RB_ABORT_CLASS_*` cooldown class, the load field the sender's
+  realign tick; the receiver mirrors teardown + cooldown so both peers re-arm
+  on the same schedule.
+
+Hosts should partition epoch ids by initiator slot
+(`epoch = counter << k | slot`) so concurrent dual initiation never collides
+and a deterministic tie-break (lower initiator slot wins; the loser yields and
+follows) can derive any episode's initiator from its id.
 
 Hosts map their existing wire onto these when aligning transports (BattleShip's
 soak-hardened `SYNETPEER_*` format stays authoritative for live matches); new
@@ -49,7 +70,10 @@ TipHold→extend **stays TipHold** (host invent-caps Live past tip and
 schedules a short rereplay only when sim already invented past the prior
 tip). `rnet_rb_resign_slot_range` refreshes sealed rows after the host
 promotes wire into history. `apply_peer_seal_rows` accepts
-`target >= corr.target` and auto-extends. `rnet_rb_suggest_target` adds
+`target >= corr.target` and auto-extends; it also refuses to let a
+**predicted** peer row overwrite a non-predicted sealed row (mask bit is
+still credited) so tip-extend invent-idle exports cannot clobber a
+wire-promoted resign. `rnet_rb_suggest_target` adds
 `cfg.tip_seal_slack` past live tip when opening an episode.
 `resolved_through` survives `session_reset`.
 

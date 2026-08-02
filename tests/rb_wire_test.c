@@ -24,8 +24,8 @@ int main(void)
     int n;
     int i;
 
-    /* RB_SYNC round-trip */
-    n = rnet_proto_encode_rb_sync(buf, sizeof(buf), MAGIC, 0xABCD, 1, 7u, 50u, 48u, 56u, 1u, 1u);
+    /* RB_SYNC round-trip (op + flags byte) */
+    n = rnet_proto_encode_rb_sync(buf, sizeof(buf), MAGIC, 0xABCD, 1, 7u, 50u, 48u, 56u, 1u, 1u, 0x03u);
     expect_true(n > 0, "rb_sync encodes");
     expect_true(rnet_proto_decode(buf, (size_t)n, MAGIC, &dec) == 0, "rb_sync decodes");
     expect_true(dec.type == RNET_PKT_RB_SYNC, "rb_sync type");
@@ -33,6 +33,14 @@ int main(void)
     expect_true(dec.rb_epoch_id == 7u && dec.rb_mismatch_tick == 50u, "rb_sync epoch/mismatch");
     expect_true(dec.rb_load_tick == 48u && dec.rb_target_tick == 56u, "rb_sync load/target");
     expect_true(dec.rb_corrected_slot == 1u && dec.rb_initiator == 1u, "rb_sync slot/initiator");
+    expect_true(dec.rb_flags == 0x03u, "rb_sync flags");
+
+    /* RB_SYNC abort op round-trip (class in mismatch field) */
+    n = rnet_proto_encode_rb_sync(buf, sizeof(buf), MAGIC, 0xABCD, 1, 9u, 2u, 44u, 0u, 0u, 2u, 0u);
+    expect_true(n > 0, "rb_sync abort encodes");
+    expect_true(rnet_proto_decode(buf, (size_t)n, MAGIC, &dec) == 0, "rb_sync abort decodes");
+    expect_true(dec.rb_initiator == 2u && dec.rb_mismatch_tick == 2u && dec.rb_load_tick == 44u,
+                "rb_sync abort op/class/realign");
 
     /* RB_SEAL_ROWS round-trip */
     for (i = 0; i < 3; ++i)

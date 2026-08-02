@@ -102,10 +102,14 @@ int rnet_proto_encode_state_probe(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet
 int rnet_proto_encode_state_probe_reply(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id,
                                         rnet_u8 local_slot, rnet_u8 op, rnet_u8 slot, rnet_u8 match);
 
-/* Rollback control packets (reserved range; rollback-mode sessions only). */
+/* Rollback control packets (reserved range; rollback-mode sessions only).
+ * RB_SYNC `op` (was "initiator"): RNET_RB_SYNC_OP_* — begin/extend, follower
+ * NACK (target field carries the follower's frontier), or episode ABORT
+ * (mismatch field carries the RNET_RB_ABORT_CLASS_* cooldown class, load
+ * field the sender's realign tick). `flags`: RNET_RB_SYNC_FLAG_*. */
 int rnet_proto_encode_rb_sync(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
                               rnet_u32 epoch_id, rnet_u32 mismatch_tick, rnet_u32 load_tick, rnet_u32 target_tick,
-                              rnet_u8 corrected_slot, rnet_u8 initiator);
+                              rnet_u8 corrected_slot, rnet_u8 initiator, rnet_u8 flags);
 int rnet_proto_encode_rb_seal_rows(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id,
                                    rnet_u8 local_slot, rnet_u32 epoch_id, rnet_u32 mismatch_tick,
                                    rnet_u32 target_tick, rnet_u8 slot, rnet_u32 row_begin,
@@ -155,6 +159,7 @@ typedef struct RNetDecodedPacket
     rnet_u32 rb_target_tick;
     rnet_u8 rb_corrected_slot;
     rnet_u8 rb_initiator;
+    rnet_u8 rb_flags; /* RB_SYNC only (uses the former pad byte) */
     rnet_u8 rb_slot;
     rnet_u32 rb_row_begin;
     rnet_u16 rb_row_count;

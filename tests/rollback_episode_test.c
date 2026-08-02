@@ -260,6 +260,28 @@ int main(void)
         rnet_rb_destroy(wide_s);
     }
 
+    /* Follower begins adopt wire flags verbatim: light-tip is initiator-
+     * authoritative, never re-derived from the follower's own watermark. */
+    {
+        RNetRbSession *f = rnet_rb_create(&cfg, &vt);
+        expect_true(f != NULL, "create follower session");
+        rnet_rb_set_peer_convergence(f, 100u);
+        memset(&corr, 0, sizeof(corr));
+        corr.epoch_id = 9u;
+        corr.mismatch_tick = 100u;
+        corr.load_tick = 100u;
+        corr.target_tick = 102u; /* would be a local light-tip candidate */
+        corr.slot = 1;
+        corr.initiator = 0u;
+        corr.from_peer_notify = 1u; /* wire flags carried no LIGHT_TIP */
+        rnet_rb_begin_episode(f, &corr);
+        expect_true((rnet_rb_get_corr_flags(f) & RNET_RB_CORR_LIGHT_TIP) == 0u,
+                    "follower does not re-derive light-tip locally");
+        expect_true(rnet_rb_recommend_light_tip(f) == 0u,
+                    "recommend_light_tip reports corr.flags only");
+        rnet_rb_destroy(f);
+    }
+
     memset(&corr, 0, sizeof(corr));
     corr.epoch_id = 8u;
     corr.mismatch_tick = 100u;
@@ -310,6 +332,29 @@ int main(void)
     expect_true(rnet_rb_all_peer_seal_rows_complete(s), "complete after delta");
     expect_true(rnet_rb_get_sealed_frame(s, 1, 104u, &got) && got.buttons == 0x201u,
                 "extended peer row");
+
+    /* Predicted peer invent must not clobber an authoritative seal. */
+    {
+        RNetRbFrame auth;
+        RNetRbFrame invent;
+        memset(&auth, 0, sizeof(auth));
+        auth.tick = 104u;
+        auth.buttons = 0xFF7Fu;
+        auth.is_valid = 1u;
+        auth.is_predicted = 0u;
+        expect_true(rnet_rb_apply_peer_seal_rows(s, 8u, 100u, 105u, 1, 4u, &auth, 1u),
+                    "auth row at 104");
+        memset(&invent, 0, sizeof(invent));
+        invent.tick = 104u;
+        invent.buttons = 0xFFFFu;
+        invent.is_valid = 1u;
+        invent.is_predicted = 1u;
+        expect_true(rnet_rb_apply_peer_seal_rows(s, 8u, 100u, 105u, 1, 4u, &invent, 1u),
+                    "predicted invent apply accepted (mask credit)");
+        expect_true(rnet_rb_get_sealed_frame(s, 1, 104u, &got) && got.buttons == 0xFF7Fu &&
+                        got.is_predicted == 0u,
+                    "predicted invent did not clobber auth seal");
+    }
 
     /* Resign after promote (same target, update buttons). */
     expect_true(rnet_rb_resign_slot_range(s, 1, 104u, 104u), "resign one tick");
