@@ -125,6 +125,11 @@ struct RNetSession
     rnet_u32 max_admit_wait_ms;
     rnet_u32 packets_rx;
     rnet_u32 input_bundle_sends;
+    /* §56 pipeline diagnostics: monotonic arrival stamp per remote wire row
+     * (first-wins, mirrors remote_rings latching). Consumption slack =
+     * now - arrival when the row is finally needed at admit. */
+    rnet_u64 remote_arr_ms[RNET_MAX_SLOTS][RNET_HISTORY_LENGTH];
+    rnet_u32 remote_arr_tick[RNET_MAX_SLOTS][RNET_HISTORY_LENGTH];
     /* ICE TURN auto-fallback timers (monotonic ms). */
     rnet_u64 ice_attempt_ms;
     rnet_u64 ice_completed_ms;
@@ -314,6 +319,12 @@ static void store_remote_frame(RNetSession *s, rnet_u8 slot, const RNetWireFrame
     }
     sample.valid = 1;
     rnet_ring_store(&s->remote_rings[slot], &sample);
+    {
+        rnet_u32 idx = frame->tick % RNET_HISTORY_LENGTH;
+        rnet_u64 now = session_now(s);
+        s->remote_arr_tick[slot][idx] = frame->tick;
+        s->remote_arr_ms[slot][idx] = now ? now : 1u;
+    }
 }
 
 static rnet_u32 hash_resolved_inputs(rnet_u32 sim_tick, const RNetInputSample *by_slot, int slots)
@@ -2659,6 +2670,30 @@ int rnet_session_prepare_local_tip(RNetSession *s, rnet_u32 sim_tick)
     }
     send_input_bundle(s);
     return 1;
+}
+
+rnet_u32 rnet_session_remote_arrival_age_ms(const RNetSession *s, int slot,
+                                            rnet_u32 wire_tick)
+{
+    rnet_u32 idx;
+    rnet_u64 now;
+    if (s == NULL || slot < 0 || slot >= (int)s->cfg.slot_count ||
+        slot == (int)s->cfg.local_slot)
+    {
+        return 0xffffffffu;
+    }
+    idx = wire_tick % RNET_HISTORY_LENGTH;
+    if (s->remote_arr_ms[slot][idx] == 0ull ||
+        s->remote_arr_tick[slot][idx] != wire_tick)
+    {
+        return 0xffffffffu;
+    }
+    now = session_now((RNetSession *)s);
+    if (now <= s->remote_arr_ms[slot][idx])
+    {
+        return 0u;
+    }
+    return (rnet_u32)(now - s->remote_arr_ms[slot][idx]);
 }
 
 int rnet_session_peek_input(const RNetSession *s, int slot, rnet_u32 wire_tick,

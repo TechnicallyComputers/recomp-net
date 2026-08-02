@@ -268,6 +268,11 @@ uint8_t rnet_rb_inputs_sealed(const RNetRbSession *s);
 uint8_t rnet_rb_tick_in_sealed_span(const RNetRbSession *s, uint32_t tick);
 uint8_t rnet_rb_get_sealed_frame(const RNetRbSession *s, int32_t slot, uint32_t tick,
                                  RNetRbFrame *out_frame);
+/* 1 iff the sealed row for (slot, tick) is safe to sim with: local seat with a
+ * valid row, a peer-delivered SEAL_ROWS row, or a wire-confirmed
+ * (!is_predicted) locally-sealed row. Predicted remote rows are NOT
+ * authoritative — arming them forks the peers when the prediction is wrong. */
+uint8_t rnet_rb_seat_row_authoritative(const RNetRbSession *s, int32_t slot, uint32_t tick);
 uint32_t rnet_rb_get_seal_span(const RNetRbSession *s);
 uint32_t rnet_rb_get_seal_base_tick(const RNetRbSession *s);
 

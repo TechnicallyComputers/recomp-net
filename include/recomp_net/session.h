@@ -223,6 +223,12 @@ int rnet_session_peek_input(const RNetSession *s, int slot, rnet_u32 wire_tick,
                             RNetInputSample *out);
 int rnet_session_peek_remote_input(const RNetSession *s, int slot, rnet_u32 wire_tick,
                                    RNetInputSample *out);
+/* §56 pipeline diagnostics: ms since the remote row for wire_tick arrived
+ * (first-wins latch). 0xffffffff if unknown / not yet arrived. Consumption
+ * slack at admit = this value; ~0 means rows arrive just-in-time (no cushion
+ * in the time domain even when tick-domain lead looks healthy). */
+rnet_u32 rnet_session_remote_arrival_age_ms(const RNetSession *s, int slot,
+                                            rnet_u32 wire_tick);
 
 /* Force session clock (rollback load / resim). Does not clear rings. */
 void rnet_session_set_sim_tick(RNetSession *s, rnet_u32 sim_tick);

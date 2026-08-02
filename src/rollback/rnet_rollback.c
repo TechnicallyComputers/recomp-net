@@ -302,6 +302,27 @@ static void rnet_rb_fill_local_row(RNetRbSession *s, uint32_t tick, uint32_t off
             dst->tick = tick;
         }
     }
+    else
+    {
+        /* Remote seat: pre-seal from host history ONLY when the row is
+         * wire-confirmed (!is_predicted) — that is the owner's transmitted
+         * pad, byte-identical to what the owner seals locally, so it is
+         * authoritative without waiting for the peer's SEAL_ROWS. Predicted
+         * rows stay unsealed: 2026-08-02 soak forked when a tip-extend left
+         * the remote seat zeroed, the arm fell back to live hist
+         * (s1=---- at arm 4179) and the peers simmed different pads. */
+        RNetRbFrame row;
+        if (s->vt.get_input_row(s->vt.ctx, (int32_t)slot, tick, &row) != 0u &&
+            row.is_valid != 0u && row.is_predicted == 0u)
+        {
+            *dst = row;
+            dst->tick = tick;
+            if (offset < 64u)
+            {
+                s->peer_seal_mask[slot] |= (1ull << offset);
+            }
+        }
+    }
 }
 
 uint8_t rnet_rb_can_extend_target(const RNetRbSession *s, uint32_t new_target)
@@ -425,8 +446,12 @@ uint8_t rnet_rb_resign_slot_range(RNetRbSession *s, int32_t slot, uint32_t from_
         }
         *dst = row;
         dst->tick = tick;
-        /* Host promoted wire into history — this offset is authoritative. */
-        if (row.is_valid != 0u)
+        /* Host promoted wire into history — this offset is authoritative.
+         * Predicted rows are NOT authority for a remote seat: crediting the
+         * mask for invented pads let the resim arm ticks the seat owner had
+         * not confirmed, forking the peers when the prediction was wrong. */
+        if (row.is_valid != 0u &&
+            (((uint32_t)slot == s->cfg.local_slot) || (row.is_predicted == 0u)))
         {
             s->peer_seal_mask[(uint32_t)slot] |= (1ull << offset);
         }
@@ -611,6 +636,28 @@ uint8_t rnet_rb_apply_peer_seal_rows(RNetRbSession *s, uint32_t epoch_id, uint32
         }
     }
     return 1u;
+}
+
+uint8_t rnet_rb_seat_row_authoritative(const RNetRbSession *s, int32_t slot, uint32_t tick)
+{
+    uint32_t offset;
+    const RNetRbFrame *row;
+    if ((s == NULL) || (rnet_rb_tick_in_sealed_span(s, tick) == 0u) ||
+        (rnet_rb_slot_valid(slot) == 0u))
+    {
+        return 0u;
+    }
+    offset = tick - s->seal_base_tick;
+    row = &s->sealed[rnet_rb_seal_index(offset, (uint32_t)slot)];
+    if ((uint32_t)slot == s->cfg.local_slot)
+    {
+        return row->is_valid;
+    }
+    if ((offset < 64u) && ((s->peer_seal_mask[(uint32_t)slot] & (1ull << offset)) != 0ull))
+    {
+        return 1u;
+    }
+    return ((row->is_valid != 0u) && (row->is_predicted == 0u)) ? 1u : 0u;
 }
 
 uint8_t rnet_rb_peer_seal_rows_complete(const RNetRbSession *s, int32_t slot)
