@@ -1235,6 +1235,22 @@ static void send_input_bundle(RNetSession *s)
         red = (int)s->delay + 1;
     }
     lo = (tip + 1U > (rnet_u32)red) ? (tip + 1U - (rnet_u32)red) : 0U;
+    /* Peer ACK of our tips: resend from ack+1 when they fell behind the
+     * tip-redundancy window (WAN/TURN loss). Cap so one pump cannot emit
+     * the whole 128-slot history. */
+    if (s->highest_remote_ack < tip)
+    {
+        rnet_u32 ack_lo = s->highest_remote_ack + 1U;
+        rnet_u32 max_back = (rnet_u32)RNET_HISTORY_LENGTH / 2U;
+        if (max_back < 32U)
+            max_back = 32U;
+        if (max_back > 64U)
+            max_back = 64U;
+        if (tip + 1U > max_back && ack_lo + max_back <= tip)
+            ack_lo = tip + 1U - max_back;
+        if (ack_lo < lo)
+            lo = ack_lo;
+    }
     ack = rnet_ring_highest_valid(
         &s->remote_rings[(s->cfg.local_slot + 1) % s->cfg.slot_count]);
     t = lo;
@@ -2677,6 +2693,22 @@ void rnet_session_set_sim_tick(RNetSession *s, rnet_u32 sim_tick)
     }
     s->sim_tick = sim_tick;
     apply_pending_delay(s);
+}
+
+void rnet_session_clear_remote_inputs(RNetSession *s)
+{
+    rnet_u8 i;
+    if (s == NULL)
+    {
+        return;
+    }
+    for (i = 0; i < RNET_MAX_SLOTS; ++i)
+    {
+        if (i == s->cfg.local_slot)
+            continue;
+        rnet_ring_clear(&s->remote_rings[i]);
+    }
+    s->highest_remote_ack = 0;
 }
 
 int rnet_session_send_rb_sync(RNetSession *s, rnet_u32 epoch_id, rnet_u32 mismatch_tick,

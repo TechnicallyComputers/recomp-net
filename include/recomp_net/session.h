@@ -227,6 +227,11 @@ int rnet_session_peek_remote_input(const RNetSession *s, int slot, rnet_u32 wire
 /* Force session clock (rollback load / resim). Does not clear rings. */
 void rnet_session_set_sim_tick(RNetSession *s, rnet_u32 sim_tick);
 
+/* Clear remote tip rings (and peer-ack watermark). Prefer not to call on
+ * Live realign — full wipe → tip=0 → mutual pcap FREEZE (MotK §49b). Kept
+ * for hard_resync-style paths that intentionally re-prime. */
+void rnet_session_clear_remote_inputs(RNetSession *s);
+
 /*
  * Rollback episode wire (opcodes 20–23, 25). MotK drains via take_* after pump.
  * Seal-row take copies up to RNET_RB_SEAL_ROWS_CHUNK_MAX frames.
