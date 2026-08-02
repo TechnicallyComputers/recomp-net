@@ -240,10 +240,18 @@ void rnet_session_set_sim_tick(RNetSession *s, rnet_u32 sim_tick);
  *           RNET_RB_ABORT_CLASS_* cooldown class, load_tick the sender's
  *           realign tick (0 = none). Receiver mirrors teardown + cooldown so
  *           both peers re-arm on the same schedule.
+ *   COMMIT — sender committed its episode (tip-hold or legacy) and left it.
+ *           load_tick carries the committed tick, epoch_id the episode. This
+ *           is distinct from RESOLVED: RESOLVED is a hash-confirm WATERMARK
+ *           that also rises on live-play interval confirms, so it cannot
+ *           prove "peer committed and left the episode" — conflating the two
+ *           made the tip-extend abandon fire on stale watermarks and fork
+ *           the cores (MotK 2026-08-02 soak, tick 768).
  */
 #define RNET_RB_SYNC_OP_NACK 0u
 #define RNET_RB_SYNC_OP_BEGIN 1u
 #define RNET_RB_SYNC_OP_ABORT 2u
+#define RNET_RB_SYNC_OP_COMMIT 3u
 
 /* RB_SYNC flags (BEGIN): initiator-authoritative episode attributes the
  * follower must adopt verbatim so both peers run the same episode shape. */

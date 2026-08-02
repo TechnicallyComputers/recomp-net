@@ -2605,20 +2605,41 @@ int rnet_session_prepare_local_tip(RNetSession *s, rnet_u32 sim_tick)
         return 0;
     }
     sample_wire = rnet_wire_tick_from_sim(sim_tick, s->delay);
-    if (!rnet_ring_get(&s->local_ring, sample_wire, &local_future))
+    /* Fill EVERY missing wire in [sim .. sim+D], not just the tip. In steady
+     * state only sample_wire is missing (one sample/admit, unchanged). After
+     * a mid-session DELAY_SYNC increase the production tip jumps from
+     * sim-1+D_old to sim+D_new, leaving [sim+D_old .. sim+D_new-1] unproduced
+     * — without the back-fill the peer must invent across the gap. A
+     * consumer at wire = sim (real-delay rollback, lockstep play) also
+     * relies on the whole prefix existing. Missing rows repeat the current
+     * sample (hold-current), matching prime_delay_inputs semantics. */
     {
-        memset(&local_future, 0, sizeof(local_future));
-        if (s->host.sample_local)
+        rnet_u32 w;
+        int have_sample = 0;
+        for (w = sim_tick; w <= sample_wire; ++w)
         {
-            s->host.sample_local(sim_tick, &local_future, s->host.ctx);
+            RNetInputSample existing;
+            if (rnet_ring_get(&s->local_ring, w, &existing))
+            {
+                continue;
+            }
+            if (!have_sample)
+            {
+                memset(&local_future, 0, sizeof(local_future));
+                if (s->host.sample_local)
+                {
+                    s->host.sample_local(sim_tick, &local_future, s->host.ctx);
+                }
+                local_future.valid = 1;
+                if (local_future.size > RNET_INPUT_MAX)
+                {
+                    local_future.size = RNET_INPUT_MAX;
+                }
+                have_sample = 1;
+            }
+            local_future.tick = w;
+            rnet_ring_store(&s->local_ring, &local_future);
         }
-        local_future.tick = sample_wire;
-        local_future.valid = 1;
-        if (local_future.size > RNET_INPUT_MAX)
-        {
-            local_future.size = RNET_INPUT_MAX;
-        }
-        rnet_ring_store(&s->local_ring, &local_future);
     }
     send_input_bundle(s);
     return 1;
