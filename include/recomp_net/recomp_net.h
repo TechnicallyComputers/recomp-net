@@ -4,6 +4,7 @@
 #include "recomp_net/address.h"
 #include "recomp_net/config.h"
 #include "recomp_net/ice.h"
+#include "recomp_net/ice_rtt.h"
 #include "recomp_net/input.h"
 #include "recomp_net/input_contract.h"
 #include "recomp_net/rollback.h"
