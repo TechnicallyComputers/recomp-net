@@ -56,10 +56,19 @@ There is no prediction window in v1.
   host↔relay pair can still win on LAN; host↔prflx should not when remotes
   are stripped.
 
+## Online topology: lobby UDP SFU star
+
+Online WebSocket lobbies always dial the lobby server’s UDP SFU on `start`.
+Every peer sends to one advertise endpoint; the server fans out opaque
+datagrams (magic + `session_id`) to every other registered seat. There is no
+guest↔guest mesh. Sim authority remains **slot 0** (session host); guests may
+rearrange among seats 1..N−1. Match traffic includes delay-sync and rollback
+opcodes when the host uses them.
+
 ## Host-as-relay (LAN hub)
 
-For 3+ seats without the lobby server input relay, the lobby owner calls
+For LAN/direct 3+ seats without the lobby SFU, the lobby owner calls
 `rnet_session_start_lan_hub` (empty peer). Guests call `rnet_session_start_lan`
 with the host endpoint. Transport hub role is independent of sim `local_slot`.
 The hub learns seats from packet `local_slot` and fans out raw datagrams to
-every other known seat (star topology).
+every other known seat (local star). Online matches do not use this path.
