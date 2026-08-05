@@ -467,6 +467,12 @@ int rnet_os_parse_hostport(const char *spec, char *host_out, size_t host_cap, rn
 
 int rnet_os_resolve_sockaddr(const char *host, rnet_u16 port, struct sockaddr_in *out)
 {
+    struct addrinfo hints;
+    struct addrinfo *results = NULL;
+    struct addrinfo *result;
+    char port_text[8];
+    int status;
+
     if (out == NULL)
     {
         return -1;
@@ -479,20 +485,47 @@ int rnet_os_resolve_sockaddr(const char *host, rnet_u16 port, struct sockaddr_in
         out->sin_addr.s_addr = htonl(INADDR_ANY);
         return 0;
     }
+
+    /* Literal IPv4 — avoid DNS for dotted quads / bind wildcards. */
 #ifdef _WIN32
+    if (InetPtonA(AF_INET, host, &out->sin_addr) == 1)
     {
-        unsigned long addr = inet_addr(host);
-        if (addr == INADDR_NONE)
-        {
-            return -1;
-        }
-        out->sin_addr.s_addr = addr;
+        return 0;
     }
 #else
-    if (inet_pton(AF_INET, host, &out->sin_addr) != 1)
+    if (inet_pton(AF_INET, host, &out->sin_addr) == 1)
     {
-        return -1;
+        return 0;
     }
 #endif
-    return 0;
+
+    /* Hostname (lobby URL host, Coturn, etc.). */
+    rnet_os_startup();
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_protocol = IPPROTO_UDP;
+    snprintf(port_text, sizeof(port_text), "%u", (unsigned)port);
+    status = getaddrinfo(host, port_text, &hints, &results);
+    if (status != 0 || results == NULL)
+    {
+        if (results != NULL)
+        {
+            freeaddrinfo(results);
+        }
+        return -1;
+    }
+    status = -1;
+    for (result = results; result != NULL; result = result->ai_next)
+    {
+        if (result->ai_family == AF_INET && result->ai_addr != NULL &&
+            (size_t)result->ai_addrlen >= sizeof(*out))
+        {
+            memcpy(out, result->ai_addr, sizeof(*out));
+            status = 0;
+            break;
+        }
+    }
+    freeaddrinfo(results);
+    return status;
 }
