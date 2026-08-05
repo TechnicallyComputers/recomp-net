@@ -57,6 +57,15 @@ static int clamp_lan_input_delay(int delay)
     return delay;
 }
 
+static int clamp_lan_prediction(int p)
+{
+    if (p < 2)
+        return 2;
+    if (p > 16)
+        return 16;
+    return p;
+}
+
 static int write_lobby(const char *path, const RNetLanLobby *lobby)
 {
     FILE *file;
@@ -70,7 +79,7 @@ static int write_lobby(const char *path, const RNetLanLobby *lobby)
     {
         return RNET_LAN_LOBBY_ERR_IO;
     }
-    write_field(file, "RNET_LAN_LOBBY_2");
+    write_field(file, "RNET_LAN_LOBBY_3");
     write_field(file, lobby->name);
     write_field(file, lobby->game);
     write_field(file, lobby->game_version);
@@ -78,11 +87,15 @@ static int write_lobby(const char *path, const RNetLanLobby *lobby)
     write_field(file, lobby->host_name);
     write_field(file, lobby->joiner_name);
     write_field(file, lobby->password);
-    ok = fprintf(file, "%d\n%d\n%d\n", lobby->started ? 1 : 0,
+    ok = fprintf(file, "%d\n%d\n%d\n%d\n%d\n", lobby->started ? 1 : 0,
                  lobby->host_slot == 1 ? 1 : 0,
                  clamp_lan_input_delay(lobby->input_delay >= 2
                                            ? lobby->input_delay
-                                           : 2)) > 0;
+                                           : 2),
+                 lobby->rollback ? 1 : 0,
+                 clamp_lan_prediction(lobby->input_prediction >= 2
+                                          ? lobby->input_prediction
+                                          : 4)) > 0;
     if (fclose(file) != 0)
     {
         ok = 0;
@@ -105,6 +118,10 @@ int rnet_lan_lobby_publish(const char *path, const RNetLanLobby *lobby)
         clean.input_delay = 2;
     if (clean.input_delay > 20)
         clean.input_delay = 20;
+    clean.rollback = clean.rollback ? 1 : 0;
+    clean.input_prediction =
+        clamp_lan_prediction(clean.input_prediction >= 2 ? clean.input_prediction
+                                                         : 4);
     return write_lobby(path, &clean);
 }
 
@@ -116,6 +133,8 @@ int rnet_lan_lobby_read(const char *path, const char *expected_game,
     char started[16];
     char host_slot[16];
     char input_delay_line[16];
+    char rollback_line[16];
+    char prediction_line[16];
     RNetLanLobby lobby;
     if (path == NULL || out == NULL)
     {
@@ -142,18 +161,35 @@ int rnet_lan_lobby_read(const char *path, const char *expected_game,
     READ_FIELD(host_slot);
 #undef READ_FIELD
     lobby.input_delay = 2;
-    if (strcmp(magic, "RNET_LAN_LOBBY_2") == 0)
+    lobby.rollback = 0;
+    lobby.input_prediction = 4;
+    if (strcmp(magic, "RNET_LAN_LOBBY_2") == 0 ||
+        strcmp(magic, "RNET_LAN_LOBBY_3") == 0)
     {
         if (!read_field(file, input_delay_line, sizeof(input_delay_line)))
         {
             fclose(file);
             return RNET_LAN_LOBBY_ERR_IO;
         }
-        lobby.input_delay = clamp_lan_input_delay((int)strtol(input_delay_line, NULL, 10));
+        lobby.input_delay =
+            clamp_lan_input_delay((int)strtol(input_delay_line, NULL, 10));
+    }
+    if (strcmp(magic, "RNET_LAN_LOBBY_3") == 0)
+    {
+        if (!read_field(file, rollback_line, sizeof(rollback_line)) ||
+            !read_field(file, prediction_line, sizeof(prediction_line)))
+        {
+            fclose(file);
+            return RNET_LAN_LOBBY_ERR_IO;
+        }
+        lobby.rollback = (strtol(rollback_line, NULL, 10) != 0) ? 1 : 0;
+        lobby.input_prediction =
+            clamp_lan_prediction((int)strtol(prediction_line, NULL, 10));
     }
     fclose(file);
     if (strcmp(magic, "RNET_LAN_LOBBY_1") != 0 &&
-        strcmp(magic, "RNET_LAN_LOBBY_2") != 0)
+        strcmp(magic, "RNET_LAN_LOBBY_2") != 0 &&
+        strcmp(magic, "RNET_LAN_LOBBY_3") != 0)
     {
         return RNET_LAN_LOBBY_ERR_IDENTITY;
     }

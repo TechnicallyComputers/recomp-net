@@ -213,6 +213,18 @@ int rnet_session_take_rb_frame_commit(RNetSession *s, rnet_u32 *through_tick,
                                       rnet_u32 *state_hash);
 
 /*
+ * GBA Multi transfer barrier (RNET_PKT_SIO_MULTI_XFER): exchange SIOMLT_SEND
+ * out-of-band at 0 effective delay. Not pad INPUT — callers must not put Multi
+ * words through D-delayed samples while this path is active.
+ */
+/* confirm_pad: lo=Confirm IRQ watermark, hi=VBlank mod 256. */
+int rnet_session_send_sio_multi_xfer(RNetSession *s, rnet_u8 unit_id, rnet_u32 seq,
+                                     rnet_u16 send, rnet_u16 confirm_pad);
+/* 1 if a peer Multi xfer is pending; copies and clears one queue entry. */
+int rnet_session_poll_sio_multi_xfer(RNetSession *s, rnet_u8 *unit_id, rnet_u32 *seq,
+                                     rnet_u16 *send, rnet_u16 *confirm_pad);
+
+/*
  * Rollback helpers over the delay-sync tip rings (no try_admit / confirm).
  * prepare_local_tip: sample+store local tip for sim_tick+D and emit INPUT.
  * peek_remote_input: non-destructive read of a remote ring row (wire tick).

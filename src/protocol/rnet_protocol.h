@@ -21,6 +21,8 @@ extern "C" {
 #define RNET_PKT_STATE_ACK 10
 #define RNET_PKT_STATE_PROBE 11       /* host→guest: hash/size before transfer */
 #define RNET_PKT_STATE_PROBE_REPLY 12 /* guest→host: match (skip xfer) or not */
+/* GBA Multi transfer barrier (0-delay SEND exchange; not pad INPUT). */
+#define RNET_PKT_SIO_MULTI_XFER 13
 
 /*
  * Rollback control range (reserved, additive). Delay-sync hosts never emit or
@@ -102,6 +104,14 @@ int rnet_proto_encode_state_probe(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet
 int rnet_proto_encode_state_probe_reply(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id,
                                         rnet_u8 local_slot, rnet_u8 op, rnet_u8 slot, rnet_u8 match);
 
+/* GBA Multi: one peer's SIOMLT_SEND for transfer seq (mGBA-style barrier).
+ * `confirm_pad` u16: lo = Confirm IRQ watermark (0..2+); hi = local VBlank
+ * count mod 256 (soft peer-frame watermark). Peers gate CONN_ESTABLISHED
+ * Multi until both report confirm>=2; hi byte bounds free-run skew. */
+int rnet_proto_encode_sio_multi_xfer(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id,
+                                     rnet_u8 local_slot, rnet_u8 unit_id, rnet_u32 seq, rnet_u16 send,
+                                     rnet_u16 confirm_pad);
+
 /* Rollback control packets (reserved range; rollback-mode sessions only).
  * RB_SYNC `op` (was "initiator"): RNET_RB_SYNC_OP_* — begin/extend, follower
  * NACK (target field carries the follower's frontier), or episode ABORT
@@ -173,6 +183,12 @@ typedef struct RNetDecodedPacket
     rnet_u32 rb_through_tick;
     rnet_u32 rb_state_hash;
     rnet_u32 rb_resolved_through;
+    /* SIO_MULTI_XFER */
+    rnet_u8 sio_unit_id;
+    rnet_u32 sio_xfer_seq;
+    rnet_u16 sio_send;
+    rnet_u8 sio_confirm; /* Confirm IRQ watermark (pad lo byte) */
+    rnet_u8 sio_vblank;  /* local VBlank mod 256 (pad hi byte) */
 } RNetDecodedPacket;
 
 /* Returns 0 on success. */

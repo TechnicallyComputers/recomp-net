@@ -28,6 +28,8 @@ int main(void)
     snprintf(room.host_name, sizeof(room.host_name), "Host");
     snprintf(room.password, sizeof(room.password), "secret");
     room.input_delay = 5;
+    room.rollback = 1;
+    room.input_prediction = 7;
 
     expect(rnet_lan_lobby_publish(path, &room) == RNET_LAN_LOBBY_OK,
            "publish room");
@@ -50,7 +52,9 @@ int main(void)
     expect(rnet_lan_lobby_read(path, "Metal Warriors", "0.1.0", &got) ==
                RNET_LAN_LOBBY_OK && got.started,
            "start visible to guest");
-    expect(got.input_delay == 5, "input_delay round-trips in V2 file");
+    expect(got.input_delay == 5, "input_delay round-trips in V3 file");
+    expect(got.rollback == 1 && got.input_prediction == 7,
+           "rollback/prediction round-trip in V3 file");
     expect(rnet_lan_lobby_set_host_slot(path, 1) == RNET_LAN_LOBBY_OK,
            "move host slot");
     expect(rnet_lan_lobby_read(path, "Metal Warriors", "0.1.0", &got) ==

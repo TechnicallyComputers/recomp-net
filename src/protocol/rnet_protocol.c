@@ -317,6 +317,26 @@ int rnet_proto_encode_state_probe_reply(rnet_u8 *out, size_t cap, rnet_u32 magic
 
 /* ---- Rollback control packets (reserved range; rollback-mode only) ---- */
 
+int rnet_proto_encode_sio_multi_xfer(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id,
+                                     rnet_u8 local_slot, rnet_u8 unit_id, rnet_u32 seq, rnet_u16 send,
+                                     rnet_u16 confirm_pad)
+{
+    rnet_u8 *c = out;
+    if (cap < 24)
+    {
+        return -1;
+    }
+    write_u32(&c, magic);
+    write_u16(&c, RNET_PKT_SIO_MULTI_XFER);
+    write_u32(&c, session_id);
+    *c++ = local_slot;
+    *c++ = unit_id;
+    write_u32(&c, seq);
+    write_u16(&c, send);
+    write_u16(&c, confirm_pad); /* lo=confirm IRQ, hi=vblank mod 256 */
+    return finish_packet(out, c, cap);
+}
+
 int rnet_proto_encode_rb_sync(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
                               rnet_u32 epoch_id, rnet_u32 mismatch_tick, rnet_u32 load_tick, rnet_u32 target_tick,
                               rnet_u8 corrected_slot, rnet_u8 initiator, rnet_u8 flags)
@@ -668,6 +688,21 @@ int rnet_proto_decode(const rnet_u8 *data, size_t len, rnet_u32 expect_magic, RN
         out->state_op = *c++;
         out->state_slot = *c++;
         out->state_probe_match = *c++;
+        break;
+    case RNET_PKT_SIO_MULTI_XFER:
+        if ((size_t)(end - c) < 10)
+        {
+            return -1;
+        }
+        out->local_slot = *c++;
+        out->sio_unit_id = *c++;
+        out->sio_xfer_seq = read_u32(&c);
+        out->sio_send = read_u16(&c);
+        {
+            rnet_u16 pad = read_u16(&c);
+            out->sio_confirm = (rnet_u8)(pad & 0xFFu);
+            out->sio_vblank = (rnet_u8)((pad >> 8) & 0xFFu);
+        }
         break;
     case RNET_PKT_RB_SYNC:
         if ((size_t)(end - c) < 20)
