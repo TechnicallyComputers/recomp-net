@@ -170,6 +170,16 @@ struct RNetSession
 
     rnet_u32 rb_resolved_q[RNET_RB_CTRL_QUEUE];
     int rb_resolved_head, rb_resolved_tail, rb_resolved_count;
+
+    /* Peer GBA Multi SEND barrier (0-delay; not pad INPUT). */
+#define RNET_SIO_XFER_QUEUE 32
+    struct {
+        rnet_u32 seq;
+        rnet_u16 send;
+        rnet_u16 confirm_pad; /* lo=confirm IRQ, hi=vblank mod 256 */
+        rnet_u8 unit_id;
+    } sio_xfer_q[RNET_SIO_XFER_QUEUE];
+    int sio_xfer_head, sio_xfer_tail, sio_xfer_count;
 };
 
 static rnet_u64 session_now(RNetSession *s)
@@ -509,6 +519,34 @@ static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
         break;
     case RNET_PKT_STATE_PROBE_REPLY:
         state_on_probe_reply(s, pkt);
+        break;
+    case RNET_PKT_SIO_MULTI_XFER:
+        if (pkt->local_slot != s->cfg.local_slot)
+        {
+            rnet_u16 pad = (rnet_u16)(pkt->sio_confirm |
+                                      ((rnet_u16)pkt->sio_vblank << 8));
+            if (s->sio_xfer_count < RNET_SIO_XFER_QUEUE)
+            {
+                s->sio_xfer_q[s->sio_xfer_head].seq = pkt->sio_xfer_seq;
+                s->sio_xfer_q[s->sio_xfer_head].send = pkt->sio_send;
+                s->sio_xfer_q[s->sio_xfer_head].unit_id = pkt->sio_unit_id;
+                s->sio_xfer_q[s->sio_xfer_head].confirm_pad = pad;
+                s->sio_xfer_head = (s->sio_xfer_head + 1) % RNET_SIO_XFER_QUEUE;
+                s->sio_xfer_count++;
+            }
+            else
+            {
+                /* Drop oldest so a live Cable Club burst can still progress. */
+                s->sio_xfer_tail = (s->sio_xfer_tail + 1) % RNET_SIO_XFER_QUEUE;
+                s->sio_xfer_count--;
+                s->sio_xfer_q[s->sio_xfer_head].seq = pkt->sio_xfer_seq;
+                s->sio_xfer_q[s->sio_xfer_head].send = pkt->sio_send;
+                s->sio_xfer_q[s->sio_xfer_head].unit_id = pkt->sio_unit_id;
+                s->sio_xfer_q[s->sio_xfer_head].confirm_pad = pad;
+                s->sio_xfer_head = (s->sio_xfer_head + 1) % RNET_SIO_XFER_QUEUE;
+                s->sio_xfer_count++;
+            }
+        }
         break;
     case RNET_PKT_RB_FRAME_COMMIT:
         if (pkt->local_slot != s->cfg.local_slot)
@@ -2930,6 +2968,44 @@ int rnet_session_take_rb_post(RNetSession *s, rnet_u32 *epoch_id, rnet_u32 *targ
         *match = s->rb_post_q[s->rb_post_tail].match;
     s->rb_post_tail = (s->rb_post_tail + 1) % RNET_RB_CTRL_QUEUE;
     s->rb_post_count--;
+    return 1;
+}
+
+int rnet_session_send_sio_multi_xfer(RNetSession *s, rnet_u8 unit_id, rnet_u32 seq,
+                                     rnet_u16 send, rnet_u16 confirm_pad)
+{
+    rnet_u8 buf[64];
+    int n;
+    if (s == NULL || s->transport.mode == RNET_TRANSPORT_NONE)
+        return -1;
+    /* Allow during READY/RUNNING so Cable Club can start as soon as UDP is up. */
+    if (s->phase != RNET_PHASE_RUNNING && s->phase != RNET_PHASE_READY)
+        return -1;
+    n = rnet_proto_encode_sio_multi_xfer(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id,
+                                         s->cfg.local_slot, unit_id, seq, send, confirm_pad);
+    if (n <= 0)
+        return -1;
+    /* Small redundancy: Multi barrier cannot hide behind INPUT FEC. */
+    send_raw(s, buf, n);
+    send_raw(s, buf, n);
+    return 0;
+}
+
+int rnet_session_poll_sio_multi_xfer(RNetSession *s, rnet_u8 *unit_id, rnet_u32 *seq,
+                                     rnet_u16 *send, rnet_u16 *confirm_pad)
+{
+    if (s == NULL || s->sio_xfer_count <= 0)
+        return 0;
+    if (unit_id)
+        *unit_id = s->sio_xfer_q[s->sio_xfer_tail].unit_id;
+    if (seq)
+        *seq = s->sio_xfer_q[s->sio_xfer_tail].seq;
+    if (send)
+        *send = s->sio_xfer_q[s->sio_xfer_tail].send;
+    if (confirm_pad)
+        *confirm_pad = s->sio_xfer_q[s->sio_xfer_tail].confirm_pad;
+    s->sio_xfer_tail = (s->sio_xfer_tail + 1) % RNET_SIO_XFER_QUEUE;
+    s->sio_xfer_count--;
     return 1;
 }
 

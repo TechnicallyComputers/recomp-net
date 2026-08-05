@@ -32,6 +32,9 @@ typedef struct RNetLanLobby {
     int started;
     int host_slot;
     int input_delay; /* host-authoritative delay frames (default 2) */
+    /* V3+: host-authoritative match caps (guest must mirror at launch). */
+    int rollback;          /* 0 = delay-sync; 1 = invent/rollback */
+    int input_prediction;  /* invent runway P; meaningful when rollback=1 */
 } RNetLanLobby;
 
 enum {
