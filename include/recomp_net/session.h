@@ -158,6 +158,7 @@ void rnet_session_get_stats(const RNetSession *s, RNetSessionStats *out);
 #define RNET_STATE_OP_SAVE 0 /* peer stores file; admit stalls until probe/xfer done */
 #define RNET_STATE_OP_LOAD 1 /* stalls admit until guest has blob */
 #define RNET_STATE_OP_SRAM 2 /* stalls admit until guest has blob */
+#define RNET_STATE_OP_RB_KF 3 /* rollback FMV media keyframe (raw boot_state snap) */
 
 /*
  * Hash probe (host→guest): announce (op, slot, size, crc).
@@ -280,6 +281,7 @@ void rnet_session_clear_remote_inputs(RNetSession *s);
  * follower must adopt verbatim so both peers run the same episode shape. */
 #define RNET_RB_SYNC_FLAG_LIGHT_TIP 0x01u /* light-tip class (skip ready-ACK RTT) */
 #define RNET_RB_SYNC_FLAG_REREPLAY 0x02u  /* tip-extend requires re-replay from load */
+#define RNET_RB_SYNC_FLAG_MEDIA_KF 0x04u  /* FMV media keyframe episode (§97) */
 
 /* Shared cooldown classes carried by ABORT (mismatch_tick field). */
 #define RNET_RB_ABORT_CLASS_REALIGN 0u  /* clean realign heal: no cooldown */
