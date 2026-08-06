@@ -80,7 +80,10 @@ Peer marks the sender gone and can exit without waiting for the RX timeout.
 ### STATE_BEGIN (8) / STATE_CHUNK (9) / STATE_ACK (10)
 
 Host→guest chunked blob transfer (savestate / memcard / SRAM). Cap:
-`RNET_STATE_MAX` (8 MiB). Chunk payload ≤ `RNET_STATE_CHUNK_MAX` (1024).
+`RNET_STATE_MAX` (8 MiB). Chunk payload ≤ `RNET_STATE_CHUNK_MAX` (1120;
+fits in `RNET_MAX_PACKET` with header+checksum). ICE/TURN uses AIMD pacing
+(start ~32 KiB / 16 chunks, max 256 KiB / 64 chunks, sticky warm-start) so
+multi‑MB MotK `.pst` transfers do not crawl on Force TURN.
 
 **BEGIN:** `local_slot`, `op`, `slot`, `pad`, `xfer_id : u32`, `total_size : u32`,
 `payload_crc : u32` (`rnet_proto_checksum` over the full blob).

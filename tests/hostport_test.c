@@ -36,6 +36,17 @@ int main(void)
     expect_true(rnet_os_parse_hostport("127.0.0.1:65536", host, sizeof(host), &port) != 0,
                 "out-of-range port rejected");
 
+    {
+        struct sockaddr_in addr;
+        expect_true(rnet_os_resolve_sockaddr("127.0.0.1", 8777, &addr) == 0,
+                    "literal IPv4 resolves");
+        expect_true(addr.sin_port == htons(8777), "literal port set");
+        expect_true(rnet_os_resolve_sockaddr("localhost", 8777, &addr) == 0,
+                    "localhost DNS resolves");
+        expect_true(addr.sin_addr.s_addr == htonl(INADDR_LOOPBACK),
+                    "localhost is loopback");
+    }
+
     if (failures == 0)
     {
         printf("hostport_test: ok\n");

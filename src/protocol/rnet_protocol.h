@@ -42,7 +42,9 @@ extern "C" {
  * one INPUT bundle. send_input_bundle also multi-packets if the window is
  * larger, but keeping this at 21 avoids a D>=8 boot deadlock. */
 #define RNET_MAX_BUNDLE 21
-#define RNET_STATE_CHUNK_MAX 1024
+/* Wire header is 28 bytes + 4-byte trailer checksum → payload ≤ 1168 in a
+ * RNET_MAX_PACKET (1200). 1120 leaves headroom for ICE/TURN framing quirks. */
+#define RNET_STATE_CHUNK_MAX 1120
 /* PSX .pst + dual memcards need multi‑MB; chunked ACK path scales with this. */
 #define RNET_STATE_MAX (8u * 1024u * 1024u)
 #define RNET_STATE_MAX_CHUNKS ((RNET_STATE_MAX + RNET_STATE_CHUNK_MAX - 1u) / RNET_STATE_CHUNK_MAX)

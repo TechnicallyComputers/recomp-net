@@ -97,6 +97,10 @@ struct RNetSession
     rnet_u32 state_cwnd;        /* in-flight byte budget */
     rnet_u32 state_chunks_cap;  /* max chunks emitted per pump */
     rnet_u32 state_ack_timeout_ms;
+    /* Survives state_clear — warm-start the next ICE transfer in-session. */
+    rnet_u32 state_sticky_cwnd;
+    rnet_u32 state_sticky_chunks;
+    rnet_u64 state_xfer_start_ms;
     /* Hash probe before transfer (host announce → guest reply). */
     int state_probe_active;
     int state_probe_sender;
@@ -705,20 +709,23 @@ static void state_probe_clear(RNetSession *s)
     }
 }
 
-/* ICE starts conservative (matches the old fixed 8 KiB / 4 chunks) then grows
- * when ACKs keep up. LAN uses a wide fixed budget — local UDP rarely needs AIMD. */
-#define RNET_STATE_ICE_CWND_MIN        (4u * 1024u)
-#define RNET_STATE_ICE_CWND_START      (8u * 1024u)
-#define RNET_STATE_ICE_CWND_MAX        (96u * 1024u)
-#define RNET_STATE_ICE_CHUNKS_MIN      2u
-#define RNET_STATE_ICE_CHUNKS_START    4u
-#define RNET_STATE_ICE_CHUNKS_MAX      32u
-#define RNET_STATE_ICE_ACK_TO_MIN_MS   60u
-#define RNET_STATE_ICE_ACK_TO_START_MS 120u
-#define RNET_STATE_ICE_ACK_TO_MAX_MS   200u
-#define RNET_STATE_LAN_CWND            (96u * 1024u)
-#define RNET_STATE_LAN_CHUNKS          96u
-#define RNET_STATE_LAN_ACK_TO_MS       50u
+/* ICE AIMD for multi‑MB MotK .pst over TURN. Cold-start used to be 8 KiB / 4
+ * chunks (far too shy); AIMD still backs off when juice drops. LAN keeps a
+ * wide fixed budget. Sticky cwnd warm-starts the next in-session transfer. */
+#define RNET_STATE_ICE_CWND_MIN        (8u * 1024u)
+#define RNET_STATE_ICE_CWND_START      (32u * 1024u)
+#define RNET_STATE_ICE_CWND_MAX        (256u * 1024u)
+#define RNET_STATE_ICE_CHUNKS_MIN      4u
+#define RNET_STATE_ICE_CHUNKS_START    16u
+#define RNET_STATE_ICE_CHUNKS_MAX      64u
+#define RNET_STATE_ICE_AI_CWND         (8u * 1024u)
+#define RNET_STATE_ICE_AI_CHUNKS       2u
+#define RNET_STATE_ICE_ACK_TO_MIN_MS   40u
+#define RNET_STATE_ICE_ACK_TO_START_MS 80u
+#define RNET_STATE_ICE_ACK_TO_MAX_MS   180u
+#define RNET_STATE_LAN_CWND            (256u * 1024u)
+#define RNET_STATE_LAN_CHUNKS          128u
+#define RNET_STATE_LAN_ACK_TO_MS       40u
 
 static int state_transport_is_ice(const RNetSession *s)
 {
@@ -731,8 +738,22 @@ static void state_pacing_reset(RNetSession *s)
         return;
     if (state_transport_is_ice(s))
     {
-        s->state_cwnd = RNET_STATE_ICE_CWND_START;
-        s->state_chunks_cap = RNET_STATE_ICE_CHUNKS_START;
+        rnet_u32 cwnd = RNET_STATE_ICE_CWND_START;
+        rnet_u32 chunks = RNET_STATE_ICE_CHUNKS_START;
+        if (s->state_sticky_cwnd >= RNET_STATE_ICE_CWND_START)
+        {
+            cwnd = s->state_sticky_cwnd;
+            if (cwnd > RNET_STATE_ICE_CWND_MAX)
+                cwnd = RNET_STATE_ICE_CWND_MAX;
+        }
+        if (s->state_sticky_chunks >= RNET_STATE_ICE_CHUNKS_START)
+        {
+            chunks = s->state_sticky_chunks;
+            if (chunks > RNET_STATE_ICE_CHUNKS_MAX)
+                chunks = RNET_STATE_ICE_CHUNKS_MAX;
+        }
+        s->state_cwnd = cwnd;
+        s->state_chunks_cap = chunks;
         s->state_ack_timeout_ms = RNET_STATE_ICE_ACK_TO_START_MS;
     }
     else
@@ -747,15 +768,19 @@ static void state_pacing_on_ack_progress(RNetSession *s)
 {
     if (s == NULL || !state_transport_is_ice(s))
         return;
-    /* Additive increase: +2 KiB and +1 chunk/pump per advancing ACK. */
+    /* Additive increase: +8 KiB and +2 chunks/pump per advancing ACK. */
     if (s->state_cwnd < RNET_STATE_ICE_CWND_MAX)
     {
-        s->state_cwnd += 2u * 1024u;
+        s->state_cwnd += RNET_STATE_ICE_AI_CWND;
         if (s->state_cwnd > RNET_STATE_ICE_CWND_MAX)
             s->state_cwnd = RNET_STATE_ICE_CWND_MAX;
     }
     if (s->state_chunks_cap < RNET_STATE_ICE_CHUNKS_MAX)
-        s->state_chunks_cap++;
+    {
+        s->state_chunks_cap += RNET_STATE_ICE_AI_CHUNKS;
+        if (s->state_chunks_cap > RNET_STATE_ICE_CHUNKS_MAX)
+            s->state_chunks_cap = RNET_STATE_ICE_CHUNKS_MAX;
+    }
     if (s->state_ack_timeout_ms > RNET_STATE_ICE_ACK_TO_MIN_MS)
     {
         s->state_ack_timeout_ms -= 5u;
@@ -778,6 +803,21 @@ static void state_pacing_on_timeout(RNetSession *s)
     s->state_ack_timeout_ms += 20u;
     if (s->state_ack_timeout_ms > RNET_STATE_ICE_ACK_TO_MAX_MS)
         s->state_ack_timeout_ms = RNET_STATE_ICE_ACK_TO_MAX_MS;
+    /* Decay sticky so the next transfer does not restart at a failed peak. */
+    if (s->state_sticky_cwnd > s->state_cwnd)
+        s->state_sticky_cwnd = s->state_cwnd;
+    if (s->state_sticky_chunks > s->state_chunks_cap)
+        s->state_sticky_chunks = s->state_chunks_cap;
+}
+
+static void state_pacing_remember_success(RNetSession *s)
+{
+    if (s == NULL || !state_transport_is_ice(s))
+        return;
+    if (s->state_cwnd > s->state_sticky_cwnd)
+        s->state_sticky_cwnd = s->state_cwnd;
+    if (s->state_chunks_cap > s->state_sticky_chunks)
+        s->state_sticky_chunks = s->state_chunks_cap;
 }
 
 static void state_clear(RNetSession *s)
@@ -806,6 +846,7 @@ static void state_clear(RNetSession *s)
     s->state_last_begin_ms = 0;
     s->state_last_progress_log_ms = 0;
     s->state_last_progress_acked = 0;
+    s->state_xfer_start_ms = 0;
     s->state_cwnd = 0;
     s->state_chunks_cap = 0;
     s->state_ack_timeout_ms = 0;
@@ -870,6 +911,7 @@ static void state_mark_ready_if_complete(RNetSession *s)
         if (s->state_peer_ack >= s->state_total)
         {
             s->state_ready = 1;
+            state_pacing_remember_success(s);
         }
         return;
     }
@@ -977,10 +1019,17 @@ static void state_drive_sender(RNetSession *s)
     if (s->state_peer_ack != s->state_last_progress_acked || s->state_last_progress_log_ms == 0 ||
         now - s->state_last_progress_log_ms >= 500ULL)
     {
+        unsigned kib_s = 0;
+        if (s->state_xfer_start_ms != 0 && now > s->state_xfer_start_ms)
+        {
+            rnet_u64 elapsed = now - s->state_xfer_start_ms;
+            if (elapsed > 0)
+                kib_s = (unsigned)((s->state_peer_ack * 1000ULL) / elapsed / 1024ULL);
+        }
         fprintf(stderr,
-                "rnet_state: xfer_id=%u op=%u %u/%u acked cwnd=%u chunks=%u to=%ums%s\n",
+                "rnet_state: xfer_id=%u op=%u %u/%u acked (%u KiB/s) cwnd=%u chunks=%u to=%ums%s\n",
                 (unsigned)s->state_xfer_id, (unsigned)s->state_op, (unsigned)s->state_peer_ack,
-                (unsigned)s->state_total, (unsigned)s->state_cwnd, (unsigned)s->state_chunks_cap,
+                (unsigned)s->state_total, kib_s, (unsigned)s->state_cwnd, (unsigned)s->state_chunks_cap,
                 (unsigned)s->state_ack_timeout_ms, is_ice ? " (ice)" : "");
         s->state_last_progress_log_ms = now;
         s->state_last_progress_acked = s->state_peer_ack;
@@ -1036,6 +1085,7 @@ static void state_on_begin(RNetSession *s, const RNetDecodedPacket *pkt)
     s->state_total = pkt->state_total_size;
     s->state_crc = pkt->state_payload_crc;
     s->state_contiguity = 0;
+    s->state_xfer_start_ms = session_now(s);
     state_send_ack(s);
 }
 
@@ -1758,7 +1808,16 @@ void rnet_session_pump(RNetSession *s)
     }
     if (s->state_active)
     {
-        state_drive_sender(s);
+        /* Burst recv↔send so ACK progress can refill the window inside one
+         * host pump (otherwise TURN transfers are gated to one cwnd/frame). */
+        int burst;
+        for (burst = 0; burst < 4; burst++)
+        {
+            state_drive_sender(s);
+            if (!s->state_active || s->state_ready)
+                break;
+            pump_recv(s);
+        }
     }
     /* LOAD apply/ready suppresses INPUT; emit HELLO so peers keep stamping
      * last_peer_rx_ms (hash-match apply of a multi‑MB .pst is otherwise silent). */
@@ -2465,6 +2524,7 @@ int rnet_session_state_begin(RNetSession *s, rnet_u8 op, rnet_u8 slot, const voi
     s->state_last_begin_ms = 0;
     s->state_last_progress_log_ms = 0;
     s->state_last_progress_acked = 0;
+    s->state_xfer_start_ms = session_now(s);
     state_pacing_reset(s);
 
     n = rnet_proto_encode_state_begin(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id, s->cfg.local_slot,
