@@ -103,8 +103,11 @@ int rnet_proto_encode_state_ack(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u
 /* Hash probe: skip transfer when guest already has identical blob. */
 int rnet_proto_encode_state_probe(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
                                   rnet_u8 op, rnet_u8 slot, rnet_u32 total_size, rnet_u32 payload_crc);
+/* Reply echoes the probe's size+crc so a late coord ACK (size=0) cannot be
+ * accepted as a hash/ready reply for a different probe with the same op/slot. */
 int rnet_proto_encode_state_probe_reply(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id,
-                                        rnet_u8 local_slot, rnet_u8 op, rnet_u8 slot, rnet_u8 match);
+                                        rnet_u8 local_slot, rnet_u8 op, rnet_u8 slot, rnet_u8 match,
+                                        rnet_u32 total_size, rnet_u32 payload_crc);
 
 /* GBA Multi: one peer's SIOMLT_SEND for transfer seq (mGBA-style barrier).
  * `confirm_pad` u16: lo = Confirm IRQ watermark (0..2+); hi = local VBlank
@@ -163,7 +166,8 @@ typedef struct RNetDecodedPacket
     rnet_u16 state_chunk_size;
     rnet_u32 state_ack_bytes;
     rnet_u8 state_chunk[RNET_STATE_CHUNK_MAX];
-    rnet_u8 state_probe_match; /* PROBE_REPLY only */
+    rnet_u8 state_probe_match; /* PROBE_REPLY only; size/crc echoed in
+                                * state_total_size / state_payload_crc */
     /* RB_* rollback control */
     rnet_u32 rb_epoch_id;
     rnet_u32 rb_mismatch_tick;

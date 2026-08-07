@@ -298,10 +298,11 @@ int rnet_proto_encode_state_probe(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet
 }
 
 int rnet_proto_encode_state_probe_reply(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id,
-                                        rnet_u8 local_slot, rnet_u8 op, rnet_u8 slot, rnet_u8 match)
+                                        rnet_u8 local_slot, rnet_u8 op, rnet_u8 slot, rnet_u8 match,
+                                        rnet_u32 total_size, rnet_u32 payload_crc)
 {
     rnet_u8 *c = out;
-    if (cap < 20)
+    if (cap < 28)
     {
         return -1;
     }
@@ -312,6 +313,8 @@ int rnet_proto_encode_state_probe_reply(rnet_u8 *out, size_t cap, rnet_u32 magic
     *c++ = op;
     *c++ = slot;
     *c++ = match ? 1 : 0;
+    write_u32(&c, total_size);
+    write_u32(&c, payload_crc);
     return finish_packet(out, c, cap);
 }
 
@@ -680,7 +683,8 @@ int rnet_proto_decode(const rnet_u8 *data, size_t len, rnet_u32 expect_magic, RN
         out->state_payload_crc = read_u32(&c);
         break;
     case RNET_PKT_STATE_PROBE_REPLY:
-        if ((size_t)(end - c) < 4)
+        /* match + echoed size/crc (binds reply to one probe generation). */
+        if ((size_t)(end - c) < 12)
         {
             return -1;
         }
@@ -688,6 +692,8 @@ int rnet_proto_decode(const rnet_u8 *data, size_t len, rnet_u32 expect_magic, RN
         out->state_op = *c++;
         out->state_slot = *c++;
         out->state_probe_match = *c++;
+        out->state_total_size = read_u32(&c);
+        out->state_payload_crc = read_u32(&c);
         break;
     case RNET_PKT_SIO_MULTI_XFER:
         if ((size_t)(end - c) < 10)

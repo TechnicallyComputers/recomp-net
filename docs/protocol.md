@@ -113,7 +113,10 @@ identical.
   sim until mutual ready + `hard_resync`.
 - Hash probes (`total_size != 0`): stall until agree or transfer.
 
-**PROBE_REPLY:** `local_slot`, `op`, `slot`, `match : u8` (1 = agree / coord done).
+**PROBE_REPLY:** `local_slot`, `op`, `slot`, `match : u8`, `total_size : u32`,
+`payload_crc : u32`. The size/crc **echo the probe being answered** so a late
+SAVE-coord or LOAD-ready ACK cannot satisfy a subsequent hash probe that shares
+the same `op`/`slot`.
 
 On hash miss the host starts STATE_BEGIN.
 

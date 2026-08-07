@@ -159,12 +159,14 @@ void rnet_session_get_stats(const RNetSession *s, RNetSessionStats *out);
 #define RNET_STATE_OP_LOAD 1 /* stalls admit until guest has blob */
 #define RNET_STATE_OP_SRAM 2 /* stalls admit until guest has blob */
 #define RNET_STATE_OP_RB_KF 3 /* rollback FMV media keyframe (raw boot_state snap) */
+#define RNET_STATE_OP_BOOT 4 /* post-BIOS host snap barrier (boot_state blob) */
 
 /*
  * Hash probe (host→guest): announce (op, slot, size, crc).
  * - SAVE + size==0: coordinate local save (no INPUT/admit stall — savestate_poll).
  * - LOAD + size==0: post-load ready rendezvous (no INPUT stall — late applier
  *   still needs tip rows; app freezes sim until mutual ready + hard_resync).
+ * - BOOT + size==0: post-boot-snap ready rendezvous (same INPUT rules as LOAD).
  * - size!=0: hash announce; stalls until probe_finish or following transfer.
  */
 int rnet_session_state_probe(RNetSession *s, rnet_u8 op, rnet_u8 slot, rnet_u32 total_size,

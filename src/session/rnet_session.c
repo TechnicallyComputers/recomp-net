@@ -1201,7 +1201,8 @@ static void state_on_probe(RNetSession *s, const RNetDecodedPacket *pkt)
         rnet_u8 buf[64];
         int n = rnet_proto_encode_state_probe_reply(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id,
                                                     s->cfg.local_slot, s->state_probe_op, s->state_probe_slot,
-                                                    s->state_probe_match ? 1u : 0u);
+                                                    s->state_probe_match ? 1u : 0u, s->state_probe_size,
+                                                    s->state_probe_crc);
         if (n > 0)
         {
             send_raw(s, buf, n);
@@ -1232,7 +1233,11 @@ static void state_on_probe_reply(RNetSession *s, const RNetDecodedPacket *pkt)
     {
         return;
     }
-    if (pkt->state_op != s->state_probe_op || pkt->state_slot != s->state_probe_slot)
+    /* Bind to the active probe generation. SAVE coord (size=0,crc=target)
+     * and LOAD ready (size=0,crc=ready) share op/slot with the following
+     * hash probe — a late ACK must not satisfy the next probe. */
+    if (pkt->state_op != s->state_probe_op || pkt->state_slot != s->state_probe_slot ||
+        pkt->state_total_size != s->state_probe_size || pkt->state_payload_crc != s->state_probe_crc)
     {
         return;
     }
@@ -2362,7 +2367,7 @@ int rnet_session_state_probe(RNetSession *s, rnet_u8 op, rnet_u8 slot, rnet_u32 
         return -1;
     }
     if (op != RNET_STATE_OP_SAVE && op != RNET_STATE_OP_LOAD && op != RNET_STATE_OP_SRAM &&
-        op != RNET_STATE_OP_RB_KF)
+        op != RNET_STATE_OP_RB_KF && op != RNET_STATE_OP_BOOT)
     {
         return -1;
     }
@@ -2442,7 +2447,7 @@ int rnet_session_state_probe_reply(RNetSession *s, int match)
     }
     n = rnet_proto_encode_state_probe_reply(buf, sizeof(buf), s->cfg.protocol_magic, s->cfg.session_id,
                                             s->cfg.local_slot, s->state_probe_op, s->state_probe_slot,
-                                            match ? 1u : 0u);
+                                            match ? 1u : 0u, s->state_probe_size, s->state_probe_crc);
     if (n <= 0)
     {
         return -1;
@@ -2453,9 +2458,9 @@ int rnet_session_state_probe_reply(RNetSession *s, int match)
     if (s->state_probe_size == 0)
     {
         s->state_stall_sim = 0;
-        if (s->state_probe_op == RNET_STATE_OP_LOAD)
+        if (s->state_probe_op == RNET_STATE_OP_LOAD || s->state_probe_op == RNET_STATE_OP_BOOT)
         {
-            /* Post-load ready ACK — done; do not keep probe for retransmit. */
+            /* Post-load / post-boot ready ACK — done; do not keep probe for retransmit. */
             state_probe_clear(s);
             return 0;
         }
@@ -2490,7 +2495,7 @@ int rnet_session_state_begin(RNetSession *s, rnet_u8 op, rnet_u8 slot, const voi
         return -1;
     }
     if (op != RNET_STATE_OP_SAVE && op != RNET_STATE_OP_LOAD && op != RNET_STATE_OP_SRAM &&
-        op != RNET_STATE_OP_RB_KF)
+        op != RNET_STATE_OP_RB_KF && op != RNET_STATE_OP_BOOT)
     {
         return -1;
     }
