@@ -23,6 +23,29 @@
 static int s_wsa_started;
 static LARGE_INTEGER s_win_monotonic_freq;
 static int s_win_monotonic_freq_init;
+static HANDLE s_win_sleep_timer;
+static int s_win_sleep_timer_init;
+
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
+/* High-res waitable timer on Win10+ (else auto-reset). Avoids Sleep()
+ * ~1–15.6 ms granularity that stretches admit/ICE wait_recv slices. */
+static void rnet_os_sleep_timer_ensure(void)
+{
+    if (s_win_sleep_timer_init != 0)
+    {
+        return;
+    }
+    s_win_sleep_timer_init = 1;
+    s_win_sleep_timer =
+        CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (s_win_sleep_timer == NULL)
+    {
+        s_win_sleep_timer = CreateWaitableTimerW(NULL, FALSE, NULL);
+    }
+}
 
 void rnet_os_startup(void)
 {
@@ -156,10 +179,32 @@ rnet_u64 rnet_os_monotonic_ms(void)
 
 void rnet_os_sleep_micros(unsigned usec)
 {
+    LARGE_INTEGER due;
+    LONGLONG hundred_ns;
+
     if (usec == 0U)
     {
         return;
     }
+
+    rnet_os_sleep_timer_ensure();
+    if (s_win_sleep_timer != NULL)
+    {
+        /* Relative due time: negative 100-ns units. */
+        hundred_ns = -((LONGLONG)usec * 10LL);
+        if (hundred_ns >= 0)
+        {
+            hundred_ns = -1LL;
+        }
+        due.QuadPart = hundred_ns;
+        if (SetWaitableTimer(s_win_sleep_timer, &due, 0, NULL, NULL, FALSE) != 0)
+        {
+            (void)WaitForSingleObject(s_win_sleep_timer, INFINITE);
+            return;
+        }
+    }
+
+    /* Fallback when waitable timer is unavailable or SetWaitableTimer fails. */
     if (usec < 1000U)
     {
         Sleep(1U);
