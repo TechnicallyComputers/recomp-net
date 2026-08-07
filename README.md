@@ -25,7 +25,7 @@ vendor SSB64 code and does not implement rollback, automatch, or game UI.
 This library has no lobby binary. The MotK / psxrecomp / SNES WebSocket lobby
 server is the open-source sibling
 [`recomp-net-server`](https://github.com/TechnicallyComputers/recomp-net-server)
-(default `ws://netplay.technicallycomputers.ca:8765`, or self-host locally).
+(default `ws://netplay.retcomm.net:8765`, or self-host locally).
 Client-facing protocol notes: [`docs/lobby.md`](docs/lobby.md).
 
 ## Build (LAN, no ICE)

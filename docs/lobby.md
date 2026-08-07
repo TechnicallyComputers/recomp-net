@@ -10,7 +10,7 @@ protocol:
 - https://github.com/TechnicallyComputers/recomp-net-server/blob/main/docs/WS_LOBBY.md
 - Architecture: https://github.com/TechnicallyComputers/recomp-net-server/blob/main/docs/HOW_IT_WORKS.md
 
-Default client URL: `ws://netplay.technicallycomputers.ca:8765`  
+Default client URL: `ws://netplay.retcomm.net:8765`  
 Override with env `PSX_NET_LOBBY_URL` (PSX) or `SNES_NET_LOBBY_URL` (SNES).
 Local bring-up: `ws://127.0.0.1:8765` (run `recomp-net-server` yourself).
 
