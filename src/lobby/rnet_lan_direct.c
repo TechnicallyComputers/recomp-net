@@ -115,10 +115,45 @@ static int parse_direct_input_delay_line(const char *line, int def)
     return clamp_direct_input_delay((int)v);
 }
 
+static int clamp_direct_prediction(int p)
+{
+    if (p < 2)
+        return 2;
+    if (p > 16)
+        return 16;
+    return p;
+}
+
+static int parse_direct_prediction_line(const char *line, int def)
+{
+    long v;
+    char *end;
+    if (!line || !line[0])
+        return clamp_direct_prediction(def);
+    v = strtol(line, &end, 10);
+    if (end == line || *end != '\0')
+        return clamp_direct_prediction(def);
+    return clamp_direct_prediction((int)v);
+}
+
+static int parse_direct_bool_line(const char *line, int def)
+{
+    long v;
+    char *end;
+    if (!line || !line[0])
+        return def ? 1 : 0;
+    v = strtol(line, &end, 10);
+    if (end == line || *end != '\0')
+        return def ? 1 : 0;
+    return v != 0 ? 1 : 0;
+}
+
 static int build_join_ok(char *buf, size_t cap, const RNetLanLobby *room)
 {
     char slot[8];
     char delay_line[16];
+    char rollback_line[8];
+    char pred_line[16];
     size_t o = 0;
     if (!room)
         return RNET_LAN_DIRECT_ERR_ARGUMENT;
@@ -126,6 +161,12 @@ static int build_join_ok(char *buf, size_t cap, const RNetLanLobby *room)
     snprintf(delay_line, sizeof(delay_line), "%d",
              clamp_direct_input_delay(room->input_delay >= 2 ? room->input_delay
                                                              : 2));
+    snprintf(rollback_line, sizeof(rollback_line), "%d",
+             room->rollback ? 1 : 0);
+    snprintf(pred_line, sizeof(pred_line), "%d",
+             clamp_direct_prediction(room->input_prediction >= 2
+                                         ? room->input_prediction
+                                         : 4));
     if (!append_line(buf, cap, &o, RNET_DJ_MAGIC) ||
         !append_line(buf, cap, &o, "JOIN_OK") ||
         !append_line(buf, cap, &o, room->endpoint) ||
@@ -135,7 +176,9 @@ static int build_join_ok(char *buf, size_t cap, const RNetLanLobby *room)
         !append_line(buf, cap, &o, room->name) ||
         !append_line(buf, cap, &o, room->game) ||
         !append_line(buf, cap, &o, room->game_version) ||
-        !append_line(buf, cap, &o, delay_line))
+        !append_line(buf, cap, &o, delay_line) ||
+        !append_line(buf, cap, &o, rollback_line) ||
+        !append_line(buf, cap, &o, pred_line))
         return RNET_LAN_DIRECT_ERR_ARGUMENT;
     return RNET_LAN_DIRECT_OK;
 }
@@ -159,28 +202,60 @@ static int build_simple(char *buf, size_t cap, const char *op)
     return RNET_LAN_DIRECT_OK;
 }
 
-static int build_start(char *buf, size_t cap, int input_delay)
+static int build_start(char *buf, size_t cap, const RNetLanLobby *room)
 {
     char delay_line[16];
+    char rollback_line[8];
+    char pred_line[16];
     size_t o = 0;
-    snprintf(delay_line, sizeof(delay_line), "%d",
-             clamp_direct_input_delay(input_delay));
+    int delay = 2;
+    int rollback = 0;
+    int pred = 4;
+    if (room) {
+        delay = clamp_direct_input_delay(room->input_delay >= 2 ? room->input_delay
+                                                                : 2);
+        rollback = room->rollback ? 1 : 0;
+        pred = clamp_direct_prediction(room->input_prediction >= 2
+                                           ? room->input_prediction
+                                           : 4);
+    }
+    snprintf(delay_line, sizeof(delay_line), "%d", delay);
+    snprintf(rollback_line, sizeof(rollback_line), "%d", rollback);
+    snprintf(pred_line, sizeof(pred_line), "%d", pred);
     if (!append_line(buf, cap, &o, RNET_DJ_MAGIC) ||
         !append_line(buf, cap, &o, "START") ||
-        !append_line(buf, cap, &o, delay_line))
+        !append_line(buf, cap, &o, delay_line) ||
+        !append_line(buf, cap, &o, rollback_line) ||
+        !append_line(buf, cap, &o, pred_line))
         return RNET_LAN_DIRECT_ERR_ARGUMENT;
     return RNET_LAN_DIRECT_OK;
 }
 
-static int build_caps(char *buf, size_t cap, int input_delay)
+static int build_caps(char *buf, size_t cap, const RNetLanLobby *room)
 {
     char delay_line[16];
+    char rollback_line[8];
+    char pred_line[16];
     size_t o = 0;
-    snprintf(delay_line, sizeof(delay_line), "%d",
-             clamp_direct_input_delay(input_delay));
+    int delay = 2;
+    int rollback = 0;
+    int pred = 4;
+    if (room) {
+        delay = clamp_direct_input_delay(room->input_delay >= 2 ? room->input_delay
+                                                                : 2);
+        rollback = room->rollback ? 1 : 0;
+        pred = clamp_direct_prediction(room->input_prediction >= 2
+                                           ? room->input_prediction
+                                           : 4);
+    }
+    snprintf(delay_line, sizeof(delay_line), "%d", delay);
+    snprintf(rollback_line, sizeof(rollback_line), "%d", rollback);
+    snprintf(pred_line, sizeof(pred_line), "%d", pred);
     if (!append_line(buf, cap, &o, RNET_DJ_MAGIC) ||
         !append_line(buf, cap, &o, "CAPS") ||
-        !append_line(buf, cap, &o, delay_line))
+        !append_line(buf, cap, &o, delay_line) ||
+        !append_line(buf, cap, &o, rollback_line) ||
+        !append_line(buf, cap, &o, pred_line))
         return RNET_LAN_DIRECT_ERR_ARGUMENT;
     return RNET_LAN_DIRECT_OK;
 }
@@ -397,23 +472,20 @@ int rnet_lan_direct_host_notify_start(RNetLanDirectHost *host,
                                       const RNetLanLobby *room)
 {
     char buf[RNET_DJ_MAX_PKT];
-    int delay = 2;
     if (!host || !host->guest_known)
         return RNET_LAN_DIRECT_ERR_IO;
-    if (room)
-        delay = clamp_direct_input_delay(room->input_delay >= 2 ? room->input_delay
-                                                                : 2);
-    if (build_start(buf, sizeof(buf), delay) != 0)
+    if (build_start(buf, sizeof(buf), room) != 0)
         return RNET_LAN_DIRECT_ERR_ARGUMENT;
     return send_text(host->sock, &host->guest, buf);
 }
 
-int rnet_lan_direct_host_notify_caps(RNetLanDirectHost *host, int input_delay)
+int rnet_lan_direct_host_notify_caps(RNetLanDirectHost *host,
+                                     const RNetLanLobby *room)
 {
     char buf[RNET_DJ_MAX_PKT];
     if (!host || !host->guest_known)
         return RNET_LAN_DIRECT_ERR_IO;
-    if (build_caps(buf, sizeof(buf), input_delay) != 0)
+    if (build_caps(buf, sizeof(buf), room) != 0)
         return RNET_LAN_DIRECT_ERR_ARGUMENT;
     return send_text(host->sock, &host->guest, buf);
 }
@@ -572,6 +644,8 @@ int rnet_lan_direct_guest_join(const char *host_hostport,
             const char *game = next_line(&cursor);
             const char *version = next_line(&cursor);
             const char *delay_line = next_line(&cursor);
+            const char *rollback_line = next_line(&cursor);
+            const char *pred_line = next_line(&cursor);
             snprintf(out_room->endpoint, sizeof(out_room->endpoint), "%s",
                      endpoint && endpoint[0] ? endpoint : host_hostport);
             snprintf(out_room->host_name, sizeof(out_room->host_name), "%s",
@@ -593,6 +667,10 @@ int rnet_lan_direct_guest_join(const char *host_hostport,
             out_room->password[0] = '\0';
             out_room->input_delay =
                 parse_direct_input_delay_line(delay_line, 2);
+            /* Optional V3 lines — older hosts omit them. */
+            out_room->rollback = parse_direct_bool_line(rollback_line, 0);
+            out_room->input_prediction =
+                parse_direct_prediction_line(pred_line, 4);
         }
         g->host = src; /* reply path may differ from typed dest after NAT */
         *out_guest = g;
@@ -659,16 +737,27 @@ int rnet_lan_direct_guest_pump(RNetLanDirectGuest *guest, RNetLanLobby *room,
     }
     if (strcmp(op, "START") == 0) {
         const char *delay_line = next_line(&cursor);
+        const char *rollback_line = next_line(&cursor);
+        const char *pred_line = next_line(&cursor);
         if (room) {
             room->started = 1;
             room->input_delay = parse_direct_input_delay_line(delay_line, 2);
+            room->rollback = parse_direct_bool_line(rollback_line, room->rollback);
+            room->input_prediction =
+                parse_direct_prediction_line(pred_line, room->input_prediction);
         }
         return 1;
     }
     if (strcmp(op, "CAPS") == 0) {
         const char *delay_line = next_line(&cursor);
-        if (room)
+        const char *rollback_line = next_line(&cursor);
+        const char *pred_line = next_line(&cursor);
+        if (room) {
             room->input_delay = parse_direct_input_delay_line(delay_line, 2);
+            room->rollback = parse_direct_bool_line(rollback_line, room->rollback);
+            room->input_prediction =
+                parse_direct_prediction_line(pred_line, room->input_prediction);
+        }
         return 0;
     }
     if (strcmp(op, "KICK") == 0 || strcmp(op, "CLOSE") == 0)

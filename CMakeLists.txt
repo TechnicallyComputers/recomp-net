@@ -21,10 +21,13 @@ set(RNET_CORE_SOURCES
   src/platform/rnet_stun.c
   src/protocol/rnet_protocol.c
   src/input/rnet_rings.c
+  src/input/rnet_input_contract.c
+  src/rollback/rnet_rollback.c
   src/lobby/rnet_lan_lobby.c
   src/lobby/rnet_lan_direct.c
   src/lobby/rnet_lan_beacon.c
   src/lobby/rnet_rtt_probe.c
+  src/lobby/rnet_ice_rtt.c
   src/transport/rnet_transport.c
   src/session/rnet_session.c
   src/ice/rnet_ice_state.c
@@ -174,6 +177,19 @@ if(RNET_BUILD_TESTS)
   add_executable(session_state_test tests/session_state_test.c)
   target_link_libraries(session_state_test PRIVATE recomp_net)
   add_test(NAME session_state_test COMMAND session_state_test)
+
+  add_executable(input_contract_test tests/input_contract_test.c)
+  target_link_libraries(input_contract_test PRIVATE recomp_net)
+  add_test(NAME input_contract_test COMMAND input_contract_test)
+
+  add_executable(rollback_episode_test tests/rollback_episode_test.c)
+  target_link_libraries(rollback_episode_test PRIVATE recomp_net)
+  add_test(NAME rollback_episode_test COMMAND rollback_episode_test)
+
+  add_executable(rb_wire_test tests/rb_wire_test.c)
+  target_link_libraries(rb_wire_test PRIVATE recomp_net)
+  target_include_directories(rb_wire_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  add_test(NAME rb_wire_test COMMAND rb_wire_test)
 endif()
 
 install(TARGETS recomp_net ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)

@@ -47,6 +47,8 @@ int rnet_os_random_bytes(void *out, size_t len);
 
 /* Parse "host:port" or ":port". host_out may be NULL. Returns 0 on success. */
 int rnet_os_parse_hostport(const char *spec, char *host_out, size_t host_cap, rnet_u16 *port_out);
+/* Resolve host to IPv4 sockaddr. Accepts dotted quads and DNS hostnames
+ * (getaddrinfo). Empty / "0.0.0.0" → INADDR_ANY. Returns 0 on success. */
 int rnet_os_resolve_sockaddr(const char *host, rnet_u16 port, struct sockaddr_in *out);
 
 #ifdef __cplusplus

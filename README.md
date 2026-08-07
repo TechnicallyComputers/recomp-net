@@ -162,9 +162,16 @@ SNES-oriented checklist: snesrecomp `docs/RECOMP_NET.md` (“Per-game patches”
 | [docs/host_integration.md](docs/host_integration.md) | Hooking a recomp host |
 | [docs/address_discovery.md](docs/address_discovery.md) | Selecting a LAN address to advertise |
 | [docs/lobby.md](docs/lobby.md) | Lobby server contract (sibling repo) |
+| [docs/rollback.md](docs/rollback.md) | Rollback mode contracts (`feat/rollback`) |
 
-## Non-goals (v1)
+## Modes
 
-- Rollback / prediction / state hashes
+- **Delay-sync (main, v0.1):** shipped `RNetSession` lockstep used by MotK / snes / psx.
+- **Rollback (`feat/rollback` branch):** shared rollback architecture; first layer is the
+  portable input contract (`recomp_net/input_contract.h`), with episode orchestration over
+  a host snapshot/hash vtable planned next. See [docs/rollback.md](docs/rollback.md).
+
+## Non-goals
+
 - Automatch or matchmaking HTTP clients
-- Game-specific pad layouts or determinism fixes (host responsibility)
+- Game-specific pad layouts, snapshots, or determinism fixes (host responsibility)

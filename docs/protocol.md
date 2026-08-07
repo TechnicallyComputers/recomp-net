@@ -51,8 +51,12 @@ packets so in-flight tips cannot first-wins into the new `sim_tick=0` window.
 
 `new_delay : u8`, `pad : u8×3`, `effective_tick : u32`
 
-Optional mid-session delay change. Applied when not past the effective tick
-(or while not running).
+Optional mid-session delay change. Receivers queue the change when
+`effective_tick` is still in the future and commit when `sim_tick` reaches
+that tick (both peers via `rnet_session_advance` / `set_sim_tick`). Applied
+immediately when already past `effective_tick` or while not RUNNING.
+`rnet_session_request_delay_change` schedules + emits; MotK uses this for
+always-on adaptive delay bumps after sustained prediction-runway freezes.
 
 ### INPUT_CONFIRM (6)
 
@@ -76,7 +80,10 @@ Peer marks the sender gone and can exit without waiting for the RX timeout.
 ### STATE_BEGIN (8) / STATE_CHUNK (9) / STATE_ACK (10)
 
 Host→guest chunked blob transfer (savestate / memcard / SRAM). Cap:
-`RNET_STATE_MAX` (8 MiB). Chunk payload ≤ `RNET_STATE_CHUNK_MAX` (1024).
+`RNET_STATE_MAX` (8 MiB). Chunk payload ≤ `RNET_STATE_CHUNK_MAX` (1120;
+fits in `RNET_MAX_PACKET` with header+checksum). ICE/TURN uses AIMD pacing
+(start ~32 KiB / 16 chunks, max 256 KiB / 64 chunks, sticky warm-start) so
+multi‑MB MotK `.pst` transfers do not crawl on Force TURN.
 
 **BEGIN:** `local_slot`, `op`, `slot`, `pad`, `xfer_id : u32`, `total_size : u32`,
 `payload_crc : u32` (`rnet_proto_checksum` over the full blob).
@@ -106,7 +113,10 @@ identical.
   sim until mutual ready + `hard_resync`.
 - Hash probes (`total_size != 0`): stall until agree or transfer.
 
-**PROBE_REPLY:** `local_slot`, `op`, `slot`, `match : u8` (1 = agree / coord done).
+**PROBE_REPLY:** `local_slot`, `op`, `slot`, `match : u8`, `total_size : u32`,
+`payload_crc : u32`. The size/crc **echo the probe being answered** so a late
+SAVE-coord or LOAD-ready ACK cannot satisfy a subsequent hash probe that shares
+the same `op`/`slot`.
 
 On hash miss the host starts STATE_BEGIN.
 

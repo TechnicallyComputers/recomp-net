@@ -298,10 +298,11 @@ int rnet_proto_encode_state_probe(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet
 }
 
 int rnet_proto_encode_state_probe_reply(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id,
-                                        rnet_u8 local_slot, rnet_u8 op, rnet_u8 slot, rnet_u8 match)
+                                        rnet_u8 local_slot, rnet_u8 op, rnet_u8 slot, rnet_u8 match,
+                                        rnet_u32 total_size, rnet_u32 payload_crc)
 {
     rnet_u8 *c = out;
-    if (cap < 20)
+    if (cap < 28)
     {
         return -1;
     }
@@ -312,6 +313,187 @@ int rnet_proto_encode_state_probe_reply(rnet_u8 *out, size_t cap, rnet_u32 magic
     *c++ = op;
     *c++ = slot;
     *c++ = match ? 1 : 0;
+    write_u32(&c, total_size);
+    write_u32(&c, payload_crc);
+    return finish_packet(out, c, cap);
+}
+
+/* ---- Rollback control packets (reserved range; rollback-mode only) ---- */
+
+int rnet_proto_encode_sio_multi_xfer(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id,
+                                     rnet_u8 local_slot, rnet_u8 unit_id, rnet_u32 seq, rnet_u16 send,
+                                     rnet_u16 confirm_pad)
+{
+    rnet_u8 *c = out;
+    if (cap < 24)
+    {
+        return -1;
+    }
+    write_u32(&c, magic);
+    write_u16(&c, RNET_PKT_SIO_MULTI_XFER);
+    write_u32(&c, session_id);
+    *c++ = local_slot;
+    *c++ = unit_id;
+    write_u32(&c, seq);
+    write_u16(&c, send);
+    write_u16(&c, confirm_pad); /* lo=confirm IRQ, hi=vblank mod 256 */
+    return finish_packet(out, c, cap);
+}
+
+int rnet_proto_encode_rb_sync(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
+                              rnet_u32 epoch_id, rnet_u32 mismatch_tick, rnet_u32 load_tick, rnet_u32 target_tick,
+                              rnet_u8 corrected_slot, rnet_u8 initiator, rnet_u8 flags)
+{
+    rnet_u8 *c = out;
+    if (cap < 36)
+    {
+        return -1;
+    }
+    write_u32(&c, magic);
+    write_u16(&c, RNET_PKT_RB_SYNC);
+    write_u32(&c, session_id);
+    *c++ = local_slot;
+    *c++ = corrected_slot;
+    *c++ = initiator;
+    *c++ = flags;
+    write_u32(&c, epoch_id);
+    write_u32(&c, mismatch_tick);
+    write_u32(&c, load_tick);
+    write_u32(&c, target_tick);
+    return finish_packet(out, c, cap);
+}
+
+static void write_rb_frame(rnet_u8 **cursor, const RNetRbWireFrame *f)
+{
+    write_u16(cursor, f->buttons);
+    (*cursor)[0] = (rnet_u8)f->stick_x;
+    (*cursor)[1] = (rnet_u8)f->stick_y;
+    (*cursor)[2] = f->source;
+    (*cursor)[3] = f->is_predicted;
+    (*cursor)[4] = f->is_valid;
+    *cursor += 5;
+}
+
+static void read_rb_frame(const rnet_u8 **cursor, RNetRbWireFrame *f)
+{
+    f->buttons = read_u16(cursor);
+    f->stick_x = (rnet_s8)(*cursor)[0];
+    f->stick_y = (rnet_s8)(*cursor)[1];
+    f->source = (*cursor)[2];
+    f->is_predicted = (*cursor)[3];
+    f->is_valid = (*cursor)[4];
+    *cursor += 5;
+}
+
+int rnet_proto_encode_rb_seal_rows(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id,
+                                   rnet_u8 local_slot, rnet_u32 epoch_id, rnet_u32 mismatch_tick,
+                                   rnet_u32 target_tick, rnet_u8 slot, rnet_u32 row_begin,
+                                   const RNetRbWireFrame *rows, rnet_u16 row_count)
+{
+    rnet_u8 *c = out;
+    rnet_u16 i;
+
+    if ((rows == NULL) && (row_count != 0u))
+    {
+        return -1;
+    }
+    if (row_count > RNET_RB_SEAL_ROWS_CHUNK_MAX)
+    {
+        row_count = RNET_RB_SEAL_ROWS_CHUNK_MAX;
+    }
+    write_u32(&c, magic);
+    write_u16(&c, RNET_PKT_RB_SEAL_ROWS);
+    write_u32(&c, session_id);
+    *c++ = local_slot;
+    *c++ = slot;
+    write_u16(&c, row_count);
+    write_u32(&c, epoch_id);
+    write_u32(&c, mismatch_tick);
+    write_u32(&c, target_tick);
+    write_u32(&c, row_begin);
+    for (i = 0u; i < row_count; ++i)
+    {
+        write_rb_frame(&c, &rows[i]);
+    }
+    return finish_packet(out, c, cap);
+}
+
+int rnet_proto_encode_rb_baseline(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id,
+                                  rnet_u8 local_slot, rnet_u32 epoch_id, rnet_u32 load_tick,
+                                  rnet_u32 digest_master, rnet_u32 digest_a, rnet_u32 digest_b, rnet_u32 digest_c)
+{
+    rnet_u8 *c = out;
+    if (cap < 40)
+    {
+        return -1;
+    }
+    write_u32(&c, magic);
+    write_u16(&c, RNET_PKT_RB_BASELINE);
+    write_u32(&c, session_id);
+    *c++ = local_slot;
+    *c++ = 0;
+    write_u32(&c, epoch_id);
+    write_u32(&c, load_tick);
+    write_u32(&c, digest_master);
+    write_u32(&c, digest_a);
+    write_u32(&c, digest_b);
+    write_u32(&c, digest_c);
+    return finish_packet(out, c, cap);
+}
+
+int rnet_proto_encode_rb_post(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id, rnet_u8 local_slot,
+                              rnet_u32 epoch_id, rnet_u32 target_tick, rnet_u32 digest_master,
+                              rnet_u32 input_digest, rnet_u8 match)
+{
+    rnet_u8 *c = out;
+    if (cap < 32)
+    {
+        return -1;
+    }
+    write_u32(&c, magic);
+    write_u16(&c, RNET_PKT_RB_POST);
+    write_u32(&c, session_id);
+    *c++ = local_slot;
+    *c++ = match ? 1 : 0;
+    write_u32(&c, epoch_id);
+    write_u32(&c, target_tick);
+    write_u32(&c, digest_master);
+    write_u32(&c, input_digest);
+    return finish_packet(out, c, cap);
+}
+
+int rnet_proto_encode_rb_frame_commit(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id,
+                                      rnet_u8 local_slot, rnet_u32 through_tick, rnet_u32 state_hash)
+{
+    rnet_u8 *c = out;
+    if (cap < 24)
+    {
+        return -1;
+    }
+    write_u32(&c, magic);
+    write_u16(&c, RNET_PKT_RB_FRAME_COMMIT);
+    write_u32(&c, session_id);
+    *c++ = local_slot;
+    *c++ = 0;
+    write_u32(&c, through_tick);
+    write_u32(&c, state_hash);
+    return finish_packet(out, c, cap);
+}
+
+int rnet_proto_encode_rb_resolved(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id,
+                                  rnet_u8 local_slot, rnet_u32 resolved_through)
+{
+    rnet_u8 *c = out;
+    if (cap < 20)
+    {
+        return -1;
+    }
+    write_u32(&c, magic);
+    write_u16(&c, RNET_PKT_RB_RESOLVED);
+    write_u32(&c, session_id);
+    *c++ = local_slot;
+    *c++ = 0;
+    write_u32(&c, resolved_through);
     return finish_packet(out, c, cap);
 }
 
@@ -501,7 +683,8 @@ int rnet_proto_decode(const rnet_u8 *data, size_t len, rnet_u32 expect_magic, RN
         out->state_payload_crc = read_u32(&c);
         break;
     case RNET_PKT_STATE_PROBE_REPLY:
-        if ((size_t)(end - c) < 4)
+        /* match + echoed size/crc (binds reply to one probe generation). */
+        if ((size_t)(end - c) < 12)
         {
             return -1;
         }
@@ -509,6 +692,110 @@ int rnet_proto_decode(const rnet_u8 *data, size_t len, rnet_u32 expect_magic, RN
         out->state_op = *c++;
         out->state_slot = *c++;
         out->state_probe_match = *c++;
+        out->state_total_size = read_u32(&c);
+        out->state_payload_crc = read_u32(&c);
+        break;
+    case RNET_PKT_SIO_MULTI_XFER:
+        if ((size_t)(end - c) < 10)
+        {
+            return -1;
+        }
+        out->local_slot = *c++;
+        out->sio_unit_id = *c++;
+        out->sio_xfer_seq = read_u32(&c);
+        out->sio_send = read_u16(&c);
+        {
+            rnet_u16 pad = read_u16(&c);
+            out->sio_confirm = (rnet_u8)(pad & 0xFFu);
+            out->sio_vblank = (rnet_u8)((pad >> 8) & 0xFFu);
+        }
+        break;
+    case RNET_PKT_RB_SYNC:
+        if ((size_t)(end - c) < 20)
+        {
+            return -1;
+        }
+        out->local_slot = *c++;
+        out->rb_corrected_slot = *c++;
+        out->rb_initiator = *c++;
+        out->rb_flags = *c++;
+        out->rb_epoch_id = read_u32(&c);
+        out->rb_mismatch_tick = read_u32(&c);
+        out->rb_load_tick = read_u32(&c);
+        out->rb_target_tick = read_u32(&c);
+        break;
+    case RNET_PKT_RB_SEAL_ROWS:
+    {
+        rnet_u16 i;
+        if ((size_t)(end - c) < 20)
+        {
+            return -1;
+        }
+        out->local_slot = *c++;
+        out->rb_slot = *c++;
+        out->rb_row_count = read_u16(&c);
+        out->rb_epoch_id = read_u32(&c);
+        out->rb_mismatch_tick = read_u32(&c);
+        out->rb_target_tick = read_u32(&c);
+        out->rb_row_begin = read_u32(&c);
+        if (out->rb_row_count > RNET_RB_SEAL_ROWS_CHUNK_MAX)
+        {
+            return -1;
+        }
+        if ((size_t)(end - c) < ((size_t)out->rb_row_count * 5u))
+        {
+            return -1;
+        }
+        for (i = 0u; i < out->rb_row_count; ++i)
+        {
+            read_rb_frame(&c, &out->rb_rows[i]);
+        }
+        break;
+    }
+    case RNET_PKT_RB_BASELINE:
+        if ((size_t)(end - c) < 26)
+        {
+            return -1;
+        }
+        out->local_slot = *c++;
+        (void)*c++;
+        out->rb_epoch_id = read_u32(&c);
+        out->rb_load_tick = read_u32(&c);
+        out->rb_digest_master = read_u32(&c);
+        out->rb_digest_a = read_u32(&c);
+        out->rb_digest_b = read_u32(&c);
+        out->rb_digest_c = read_u32(&c);
+        break;
+    case RNET_PKT_RB_POST:
+        if ((size_t)(end - c) < 18)
+        {
+            return -1;
+        }
+        out->local_slot = *c++;
+        out->rb_match = *c++;
+        out->rb_epoch_id = read_u32(&c);
+        out->rb_target_tick = read_u32(&c);
+        out->rb_digest_master = read_u32(&c);
+        out->rb_input_digest = read_u32(&c);
+        break;
+    case RNET_PKT_RB_FRAME_COMMIT:
+        if ((size_t)(end - c) < 10)
+        {
+            return -1;
+        }
+        out->local_slot = *c++;
+        (void)*c++;
+        out->rb_through_tick = read_u32(&c);
+        out->rb_state_hash = read_u32(&c);
+        break;
+    case RNET_PKT_RB_RESOLVED:
+        if ((size_t)(end - c) < 6)
+        {
+            return -1;
+        }
+        out->local_slot = *c++;
+        (void)*c++;
+        out->rb_resolved_through = read_u32(&c);
         break;
     default:
         return -1;
