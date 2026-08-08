@@ -10,6 +10,8 @@ option(RNET_ICE_BUNDLE_STATIC
   "Fetch/build static libjuice into recomp_net (portable; no system .so)" ON)
 option(RNET_ICE_FORCE_TURN
   "Testing: only emit/accept ICE typ relay candidates (requires TURN)" OFF)
+set(RNET_LIBJUICE_ROOT "" CACHE PATH
+  "Optional path to libjuice sources (skip FetchContent when set)")
 option(RNET_BUILD_EXAMPLES "Build example programs" ON)
 option(RNET_BUILD_TESTS "Build unit tests" ON)
 
@@ -71,10 +73,38 @@ if(RNET_ENABLE_ICE)
       set(_rnet_juice_ok TRUE)
     endif()
   endif()
+  # Offline / vendored tree (setup CI can pre-seed this to skip network).
+  if(NOT _rnet_juice_ok AND EXISTS
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libjuice/CMakeLists.txt")
+    message(STATUS "Libjuice: using vendored third_party/libjuice")
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(NO_TESTS ON CACHE BOOL "" FORCE)
+    set(NO_SERVER ON CACHE BOOL "" FORCE)
+    set(USE_NETTLE OFF CACHE BOOL "" FORCE)
+    set(WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/third_party/libjuice"
+                     "${CMAKE_BINARY_DIR}/third_party-libjuice")
+    set(_rnet_juice_ok TRUE)
+  endif()
+  if(NOT _rnet_juice_ok AND RNET_LIBJUICE_ROOT AND EXISTS
+      "${RNET_LIBJUICE_ROOT}/CMakeLists.txt")
+    message(STATUS "Libjuice: using RNET_LIBJUICE_ROOT=${RNET_LIBJUICE_ROOT}")
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(NO_TESTS ON CACHE BOOL "" FORCE)
+    set(NO_SERVER ON CACHE BOOL "" FORCE)
+    set(USE_NETTLE OFF CACHE BOOL "" FORCE)
+    set(WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${RNET_LIBJUICE_ROOT}"
+                     "${CMAKE_BINARY_DIR}/rnet-libjuice-root")
+    set(_rnet_juice_ok TRUE)
+  endif()
   if(NOT _rnet_juice_ok)
     include(FetchContent)
+    # URL archive (not GIT_REPOSITORY): cmake's file(DOWNLOAD) avoids system
+    # git-remote-https, which breaks under RetComM AppImage LD_LIBRARY_PATH
+    # (curl_global_trace / CURL_OPENSSL_4 symbol mismatch).
     message(STATUS
-      "Libjuice: bundling static juice via FetchContent "
+      "Libjuice: bundling static juice via FetchContent URL "
       "(RNET_ICE_BUNDLE_STATIC=${RNET_ICE_BUNDLE_STATIC})")
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
     set(NO_TESTS ON CACHE BOOL "" FORCE)
@@ -83,11 +113,13 @@ if(RNET_ENABLE_ICE)
     set(WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(
       libjuice
-      GIT_REPOSITORY https://github.com/paullouisageneau/libjuice.git
-      GIT_TAG        v1.7.2
-      GIT_SHALLOW    TRUE
+      URL https://github.com/paullouisageneau/libjuice/archive/refs/tags/v1.7.2.tar.gz
+      URL_HASH SHA256=75159867c4a5a689a6559e11aa0d30c9eba12ce73a4ae3d898b521467e1f635d
     )
     FetchContent_MakeAvailable(libjuice)
+    set(_rnet_juice_ok TRUE)
+  endif()
+  if(_rnet_juice_ok)
     # Parent -std=c11 / strict ISO hides getaddrinfo without a feature macro.
     if(TARGET juice-static)
       target_compile_definitions(juice-static PRIVATE _GNU_SOURCE)
