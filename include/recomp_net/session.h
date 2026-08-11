@@ -81,6 +81,9 @@ int rnet_session_send_bye(RNetSession *s);
 /**
  * Non-zero if peer sent BYE or no valid UDP for timeout_ms after first RX.
  * Pass ~1500 for a snappy disconnect while still tolerating brief stalls.
+ * Pass 0 for BYE-only (no silence timeout) — used during load barriers and
+ * while LINKING before HELLO (rematch boot can exceed 15s on one peer).
+ * Before any peer RX, LINKING/RUNNING uses a ≥90s link budget (not *10).
  */
 int rnet_session_peer_disconnected(const RNetSession *s, rnet_u64 timeout_ms);
 

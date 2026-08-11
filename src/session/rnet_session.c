@@ -2183,12 +2183,19 @@ int rnet_session_peer_disconnected(const RNetSession *s, rnet_u64 timeout_ms)
     if (s->last_peer_rx_ms == 0)
     {
         /* No peer traffic yet — only after we expected packets (linking/running).
-         * Generous window so slow HELLO exchange isn't a false disconnect. */
+         * Rematch session_reboot is often >15s on the slower peer; the old
+         * timeout_ms*10 (~15s at 1500) false-disconnected the fast peer and
+         * BYE'd both back to lobby. Keep a long link budget; callers that
+         * pass timeout_ms==0 skip this path entirely (BYE-only). */
+        rnet_u64 link_budget_ms;
         if (s->phase != RNET_PHASE_RUNNING && s->phase != RNET_PHASE_LINKING)
         {
             return 0;
         }
-        if (s->session_start_ms != 0 && (now - s->session_start_ms) > (timeout_ms * 10u))
+        link_budget_ms = timeout_ms * 60u;
+        if (link_budget_ms < 90000u)
+            link_budget_ms = 90000u;
+        if (s->session_start_ms != 0 && (now - s->session_start_ms) > link_budget_ms)
         {
             return 1;
         }
