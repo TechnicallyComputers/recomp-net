@@ -283,12 +283,14 @@ static int ice_recv_bridge(void *ice_ctx, rnet_u8 *buf, size_t cap, size_t *out_
 }
 #endif /* RNET_ENABLE_ICE */
 
-static int remote_tick_in_live_window(const RNetSession *s, rnet_u32 tick)
+static int remote_tick_in_live_window(const RNetSession *s, rnet_u8 slot, rnet_u32 tick)
 {
     rnet_u32 tip;
     rnet_u32 slop;
     rnet_u32 lo;
     rnet_u32 hi;
+    rnet_u32 remote_hi;
+    rnet_u32 ancient;
     if (s == NULL || s->phase != RNET_PHASE_RUNNING)
     {
         return 1;
@@ -301,7 +303,27 @@ static int remote_tick_in_live_window(const RNetSession *s, rnet_u32 tick)
     }
     lo = (s->sim_tick > slop) ? (s->sim_tick - slop) : 0u;
     hi = tip + slop;
-    return (tick >= lo && tick <= hi) ? 1 : 0;
+    if (tick >= lo && tick <= hi)
+    {
+        return 1;
+    }
+    /* Rematch / asymmetric boot: the faster peer invents up to P ahead, then
+     * pcap_freeze. By then lo = sim-slop can sit above the stalled peer tip
+     * (e.g. remote=5, sim=15, lo=7) so tip+1 is dropped forever and freeze
+     * never clears. Accept gap-filling tips that extend the remote watermark
+     * even when below lo; still reject ancient hard_resync residue. */
+    if (slot >= s->cfg.slot_count)
+    {
+        return 0;
+    }
+    remote_hi = rnet_ring_highest_valid(&s->remote_rings[slot]);
+    ancient = 64u;
+    if (tick > remote_hi && tick <= hi &&
+        (s->sim_tick <= ancient || tick + ancient >= s->sim_tick))
+    {
+        return 1;
+    }
+    return 0;
 }
 
 static void store_remote_frame(RNetSession *s, rnet_u8 slot, const RNetWireFrame *frame)
@@ -315,7 +337,7 @@ static void store_remote_frame(RNetSession *s, rnet_u8 slot, const RNetWireFrame
     /* Drop previous-epoch residue after hard_resync (sim_tick→0). Those ticks
      * share ring slots with the new tip via tick%HISTORY and first-wins would
      * otherwise keep remotes_ready_for_sim failing until the peer stops. */
-    if (!remote_tick_in_live_window(s, frame->tick))
+    if (!remote_tick_in_live_window(s, slot, frame->tick))
     {
         return;
     }
@@ -2203,6 +2225,15 @@ int rnet_session_peer_disconnected(const RNetSession *s, rnet_u64 timeout_ms)
     }
     last = s->last_peer_rx_ms;
     return (now > last && (now - last) >= timeout_ms) ? 1 : 0;
+}
+
+void rnet_session_touch_peer_liveness(RNetSession *s)
+{
+    if (s == NULL || s->peer_gone)
+    {
+        return;
+    }
+    s->last_peer_rx_ms = session_now(s);
 }
 
 void rnet_session_push_signal(RNetSession *s, const RNetSignal *msg)

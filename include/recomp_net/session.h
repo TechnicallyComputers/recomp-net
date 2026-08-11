@@ -87,6 +87,13 @@ int rnet_session_send_bye(RNetSession *s);
  */
 int rnet_session_peer_disconnected(const RNetSession *s, rnet_u64 timeout_ms);
 
+/**
+ * Stamp last_peer_rx_ms = now without clearing peer_gone.
+ * Call after a pump when entering an admit barrier so free-run / heavy dig
+ * between vblanks cannot false-trip the RUNNING silence budget. BYE still wins.
+ */
+void rnet_session_touch_peer_liveness(RNetSession *s);
+
 /* Deliver an inbound signaling message from the lobby. */
 void rnet_session_push_signal(RNetSession *s, const RNetSignal *msg);
 
