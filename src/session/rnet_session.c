@@ -1301,6 +1301,11 @@ static void maybe_bootstrap(RNetSession *s)
         s->peer_ready[s->cfg.local_slot] = 1;
         for (slot = 0; slot < s->cfg.slot_count; ++slot)
         {
+            if (!rnet_config_slot_occupied(&s->cfg, slot))
+            {
+                s->peer_ready[slot] = 1; /* empty seat — no READY expected */
+                continue;
+            }
             if (!s->peer_ready[slot])
             {
                 all_ready = 0;
@@ -1435,6 +1440,10 @@ static int remotes_ready_for_play_wire(RNetSession *s, rnet_u32 play_wire)
         {
             continue;
         }
+        if (!rnet_config_slot_occupied(&s->cfg, slot))
+        {
+            continue; /* empty lobby seat — local neutral, not on the wire */
+        }
         if (!rnet_ring_get(&s->remote_rings[slot], play_wire, &tmp))
         {
             return 0;
@@ -1469,7 +1478,16 @@ static int collect_wire_inputs(RNetSession *s, rnet_u32 wire,
     for (slot = 0; slot < s->cfg.slot_count; ++slot)
     {
         RNetInputSample sample;
-        int found = slot == s->cfg.local_slot
+        int found;
+        if (!rnet_config_slot_occupied(&s->cfg, slot))
+        {
+            memset(&sample, 0, sizeof(sample));
+            sample.tick = wire;
+            sample.valid = 1;
+            resolved[slot] = sample;
+            continue;
+        }
+        found = slot == s->cfg.local_slot
             ? rnet_ring_get(&s->local_ring, wire, &sample)
             : rnet_ring_get(&s->remote_rings[slot], wire, &sample);
         if (!found) return 0;
@@ -1498,6 +1516,7 @@ static int prepare_wire_confirm(RNetSession *s, rnet_u32 wire, int force_send)
     for (slot = 0; slot < s->cfg.slot_count; ++slot)
     {
         if (slot == s->cfg.local_slot) continue;
+        if (!rnet_config_slot_occupied(&s->cfg, slot)) continue;
         if (s->peer_history_valid[index][slot] &&
             s->peer_history_tick[index][slot] == wire &&
             s->peer_history_hash[index][slot] != hash)
@@ -1526,6 +1545,7 @@ static int wire_confirmations_agree(RNetSession *s, rnet_u32 wire)
     for (slot = 0; slot < s->cfg.slot_count; ++slot)
     {
         if (slot == s->cfg.local_slot) continue;
+        if (!rnet_config_slot_occupied(&s->cfg, slot)) continue;
         if (!s->peer_history_valid[index][slot] ||
             s->peer_history_tick[index][slot] != wire)
             return 0;
@@ -1978,6 +1998,14 @@ int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick)
             resolved[slot] = local_play;
             resolved[slot].tick = sim_tick;
         }
+        else if (!rnet_config_slot_occupied(&s->cfg, slot))
+        {
+            /* Sparse lobby seat: deterministic neutral (matches delay-prefix
+             * seed zeros). All peers synthesize the same bytes locally. */
+            memset(&resolved[slot], 0, sizeof(resolved[slot]));
+            resolved[slot].tick = sim_tick;
+            resolved[slot].valid = 1;
+        }
         else
         {
             RNetInputSample remote;
@@ -2367,6 +2395,8 @@ void rnet_session_get_stats(const RNetSession *s, RNetSessionStats *out)
     for (slot = 0; slot < s->cfg.slot_count; ++slot) {
         rnet_u32 tip;
         if (slot == s->cfg.local_slot)
+            continue;
+        if (!rnet_config_slot_occupied(&s->cfg, slot))
             continue;
         tip = rnet_ring_highest_valid(&s->remote_rings[slot]);
         if (!have_remote || tip > highest_remote)
@@ -2859,6 +2889,20 @@ int rnet_session_peek_remote_input(const RNetSession *s, int slot, rnet_u32 wire
     if (s == NULL || slot == (int)s->cfg.local_slot)
     {
         return 0;
+    }
+    if (slot < 0 || slot >= (int)s->cfg.slot_count)
+    {
+        return 0;
+    }
+    if (!rnet_config_slot_occupied(&s->cfg, (rnet_u8)slot))
+    {
+        if (out)
+        {
+            memset(out, 0, sizeof(*out));
+            out->tick = wire_tick;
+            out->valid = 1;
+        }
+        return 1;
     }
     return rnet_session_peek_input(s, slot, wire_tick, out);
 }

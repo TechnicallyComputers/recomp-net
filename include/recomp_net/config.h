@@ -26,6 +26,11 @@ typedef struct RNetConfig
     rnet_u32 session_id;
     /* Host-defined protocol magic (default 0x524E4554 "RNET"). */
     rnet_u32 protocol_magic;
+    /* Bit i set = lobby seat i is occupied by a real peer. 0 = all seats in
+     * [0, slot_count) occupied (legacy). Sparse rooms (e.g. seats 0+2 in a
+     * 4-max lobby) must clear empty bits so READY/admit do not wait forever
+     * on a phantom remote. Empty seats use deterministic neutral samples. */
+    rnet_u32 occupied_mask;
 } RNetConfig;
 
 static inline void rnet_config_init_defaults(RNetConfig *cfg)
@@ -40,6 +45,20 @@ static inline void rnet_config_init_defaults(RNetConfig *cfg)
     cfg->bundle_redundancy = RNET_DEFAULT_BUNDLE_REDUNDANCY;
     cfg->session_id = 1;
     cfg->protocol_magic = 0x524E4554u; /* 'RNET' */
+    cfg->occupied_mask = 0; /* all occupied */
+}
+
+/* 1 if seat is a real peer (or mask unset ⇒ every seat in range). */
+static inline int rnet_config_slot_occupied(const RNetConfig *cfg, rnet_u8 slot)
+{
+    rnet_u32 mask;
+    if (cfg == NULL || slot >= RNET_MAX_SLOTS || slot >= cfg->slot_count)
+        return 0;
+    mask = cfg->occupied_mask;
+    if (mask == 0u)
+        mask = (cfg->slot_count >= 32) ? 0xffffffffu
+                                       : ((1u << cfg->slot_count) - 1u);
+    return (mask & (1u << slot)) != 0;
 }
 
 #ifdef __cplusplus
