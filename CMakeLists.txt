@@ -125,13 +125,21 @@ if(RNET_ENABLE_ICE)
     # Unix: _GNU_SOURCE exposes getaddrinfo. Windows/MinGW: that same
     # macro plus __STRICT_ANSI__ skips IN_ADDR in inaddr.h, then
     # mstcpip.h (via ws2tcpip.h) fails; libjuice also needs gnu11 for
-    # <sys/time.h>. C_EXTENSIONS ON → -std=gnu11 for juice only.
+    # <sys/time.h>. C_EXTENSIONS ON alone is not enough under RetComM
+    # cmake-clang-v1 — toolchain / CMAKE_C_FLAGS often keep -std=c11, so
+    # force -std=gnu11 on the juice targets for Clang/GNU on Windows.
     foreach(_rnet_juice IN ITEMS juice-static juice)
       if(TARGET ${_rnet_juice})
         if(UNIX)
           target_compile_definitions(${_rnet_juice} PRIVATE _GNU_SOURCE)
         endif()
-        set_target_properties(${_rnet_juice} PROPERTIES C_EXTENSIONS ON)
+        set_target_properties(${_rnet_juice} PROPERTIES
+          C_STANDARD 11
+          C_STANDARD_REQUIRED ON
+          C_EXTENSIONS ON)
+        if(WIN32 AND CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+          target_compile_options(${_rnet_juice} PRIVATE -std=gnu11)
+        endif()
       endif()
     endforeach()
     if(NOT TARGET Libjuice::Libjuice)
