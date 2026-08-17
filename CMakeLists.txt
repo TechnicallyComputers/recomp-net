@@ -104,6 +104,12 @@ if(RNET_ENABLE_ICE)
     # URL archive (not GIT_REPOSITORY): cmake's file(DOWNLOAD) avoids system
     # git-remote-https, which breaks under RetComM AppImage LD_LIBRARY_PATH
     # (curl_global_trace / CURL_OPENSSL_4 symbol mismatch).
+    #
+    # CMP0135 NEW + DOWNLOAD_EXTRACT_TIMESTAMP: stamp extracted files at
+    # extract time, not archive mtimes. Archive timestamps (often far in the
+    # past, occasionally ahead of a skewed host clock) make Ninja treat
+    # build.ninja as forever dirty ("still dirty after 100 tries") on Windows
+    # Hub builds that FetchContent libjuice into the game build tree.
     message(STATUS
       "Libjuice: bundling static juice via FetchContent URL "
       "(RNET_ICE_BUNDLE_STATIC=${RNET_ICE_BUNDLE_STATIC})")
@@ -112,11 +118,23 @@ if(RNET_ENABLE_ICE)
     set(NO_SERVER ON CACHE BOOL "" FORCE)
     set(USE_NETTLE OFF CACHE BOOL "" FORCE)
     set(WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(
-      libjuice
-      URL https://github.com/paullouisageneau/libjuice/archive/refs/tags/v1.7.2.tar.gz
-      URL_HASH SHA256=75159867c4a5a689a6559e11aa0d30c9eba12ce73a4ae3d898b521467e1f635d
-    )
+    if(POLICY CMP0135)
+      cmake_policy(SET CMP0135 NEW)
+    endif()
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24")
+      FetchContent_Declare(
+        libjuice
+        URL https://github.com/paullouisageneau/libjuice/archive/refs/tags/v1.7.2.tar.gz
+        URL_HASH SHA256=75159867c4a5a689a6559e11aa0d30c9eba12ce73a4ae3d898b521467e1f635d
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+      )
+    else()
+      FetchContent_Declare(
+        libjuice
+        URL https://github.com/paullouisageneau/libjuice/archive/refs/tags/v1.7.2.tar.gz
+        URL_HASH SHA256=75159867c4a5a689a6559e11aa0d30c9eba12ce73a4ae3d898b521467e1f635d
+      )
+    endif()
     FetchContent_MakeAvailable(libjuice)
     set(_rnet_juice_ok TRUE)
   endif()
