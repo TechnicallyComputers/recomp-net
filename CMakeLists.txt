@@ -120,13 +120,19 @@ if(RNET_ENABLE_ICE)
     set(_rnet_juice_ok TRUE)
   endif()
   if(_rnet_juice_ok)
-    # Parent -std=c11 / strict ISO hides getaddrinfo without a feature macro.
-    if(TARGET juice-static)
-      target_compile_definitions(juice-static PRIVATE _GNU_SOURCE)
-    endif()
-    if(TARGET juice)
-      target_compile_definitions(juice PRIVATE _GNU_SOURCE)
-    endif()
+    # Parent CMAKE_C_EXTENSIONS=OFF compiles juice as -std=c11.
+    # Unix: _GNU_SOURCE exposes getaddrinfo. Windows/MinGW: that same
+    # macro plus __STRICT_ANSI__ skips IN_ADDR in inaddr.h, then
+    # mstcpip.h (via ws2tcpip.h) fails; libjuice also needs gnu11 for
+    # <sys/time.h>. C_EXTENSIONS ON → -std=gnu11 for juice only.
+    foreach(_rnet_juice IN ITEMS juice-static juice)
+      if(TARGET ${_rnet_juice})
+        if(UNIX)
+          target_compile_definitions(${_rnet_juice} PRIVATE _GNU_SOURCE)
+        endif()
+        set_target_properties(${_rnet_juice} PROPERTIES C_EXTENSIONS ON)
+      endif()
+    endforeach()
     if(NOT TARGET Libjuice::Libjuice)
       if(TARGET juice-static)
         add_library(Libjuice::Libjuice ALIAS juice-static)
