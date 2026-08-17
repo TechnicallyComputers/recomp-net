@@ -283,12 +283,14 @@ static int ice_recv_bridge(void *ice_ctx, rnet_u8 *buf, size_t cap, size_t *out_
 }
 #endif /* RNET_ENABLE_ICE */
 
-static int remote_tick_in_live_window(const RNetSession *s, rnet_u32 tick)
+static int remote_tick_in_live_window(const RNetSession *s, rnet_u8 slot, rnet_u32 tick)
 {
     rnet_u32 tip;
     rnet_u32 slop;
     rnet_u32 lo;
     rnet_u32 hi;
+    rnet_u32 remote_hi;
+    rnet_u32 ancient;
     if (s == NULL || s->phase != RNET_PHASE_RUNNING)
     {
         return 1;
@@ -301,7 +303,27 @@ static int remote_tick_in_live_window(const RNetSession *s, rnet_u32 tick)
     }
     lo = (s->sim_tick > slop) ? (s->sim_tick - slop) : 0u;
     hi = tip + slop;
-    return (tick >= lo && tick <= hi) ? 1 : 0;
+    if (tick >= lo && tick <= hi)
+    {
+        return 1;
+    }
+    /* Rematch / asymmetric boot: the faster peer invents up to P ahead, then
+     * pcap_freeze. By then lo = sim-slop can sit above the stalled peer tip
+     * (e.g. remote=5, sim=15, lo=7) so tip+1 is dropped forever and freeze
+     * never clears. Accept gap-filling tips that extend the remote watermark
+     * even when below lo; still reject ancient hard_resync residue. */
+    if (slot >= s->cfg.slot_count)
+    {
+        return 0;
+    }
+    remote_hi = rnet_ring_highest_valid(&s->remote_rings[slot]);
+    ancient = 64u;
+    if (tick > remote_hi && tick <= hi &&
+        (s->sim_tick <= ancient || tick + ancient >= s->sim_tick))
+    {
+        return 1;
+    }
+    return 0;
 }
 
 static void store_remote_frame(RNetSession *s, rnet_u8 slot, const RNetWireFrame *frame)
@@ -315,7 +337,7 @@ static void store_remote_frame(RNetSession *s, rnet_u8 slot, const RNetWireFrame
     /* Drop previous-epoch residue after hard_resync (sim_tick→0). Those ticks
      * share ring slots with the new tip via tick%HISTORY and first-wins would
      * otherwise keep remotes_ready_for_sim failing until the peer stops. */
-    if (!remote_tick_in_live_window(s, frame->tick))
+    if (!remote_tick_in_live_window(s, slot, frame->tick))
     {
         return;
     }
@@ -1279,6 +1301,11 @@ static void maybe_bootstrap(RNetSession *s)
         s->peer_ready[s->cfg.local_slot] = 1;
         for (slot = 0; slot < s->cfg.slot_count; ++slot)
         {
+            if (!rnet_config_slot_occupied(&s->cfg, slot))
+            {
+                s->peer_ready[slot] = 1; /* empty seat — no READY expected */
+                continue;
+            }
             if (!s->peer_ready[slot])
             {
                 all_ready = 0;
@@ -1413,6 +1440,10 @@ static int remotes_ready_for_play_wire(RNetSession *s, rnet_u32 play_wire)
         {
             continue;
         }
+        if (!rnet_config_slot_occupied(&s->cfg, slot))
+        {
+            continue; /* empty lobby seat — local neutral, not on the wire */
+        }
         if (!rnet_ring_get(&s->remote_rings[slot], play_wire, &tmp))
         {
             return 0;
@@ -1447,7 +1478,16 @@ static int collect_wire_inputs(RNetSession *s, rnet_u32 wire,
     for (slot = 0; slot < s->cfg.slot_count; ++slot)
     {
         RNetInputSample sample;
-        int found = slot == s->cfg.local_slot
+        int found;
+        if (!rnet_config_slot_occupied(&s->cfg, slot))
+        {
+            memset(&sample, 0, sizeof(sample));
+            sample.tick = wire;
+            sample.valid = 1;
+            resolved[slot] = sample;
+            continue;
+        }
+        found = slot == s->cfg.local_slot
             ? rnet_ring_get(&s->local_ring, wire, &sample)
             : rnet_ring_get(&s->remote_rings[slot], wire, &sample);
         if (!found) return 0;
@@ -1476,6 +1516,7 @@ static int prepare_wire_confirm(RNetSession *s, rnet_u32 wire, int force_send)
     for (slot = 0; slot < s->cfg.slot_count; ++slot)
     {
         if (slot == s->cfg.local_slot) continue;
+        if (!rnet_config_slot_occupied(&s->cfg, slot)) continue;
         if (s->peer_history_valid[index][slot] &&
             s->peer_history_tick[index][slot] == wire &&
             s->peer_history_hash[index][slot] != hash)
@@ -1504,6 +1545,7 @@ static int wire_confirmations_agree(RNetSession *s, rnet_u32 wire)
     for (slot = 0; slot < s->cfg.slot_count; ++slot)
     {
         if (slot == s->cfg.local_slot) continue;
+        if (!rnet_config_slot_occupied(&s->cfg, slot)) continue;
         if (!s->peer_history_valid[index][slot] ||
             s->peer_history_tick[index][slot] != wire)
             return 0;
@@ -1956,6 +1998,14 @@ int rnet_session_try_admit(RNetSession *s, rnet_u32 sim_tick)
             resolved[slot] = local_play;
             resolved[slot].tick = sim_tick;
         }
+        else if (!rnet_config_slot_occupied(&s->cfg, slot))
+        {
+            /* Sparse lobby seat: deterministic neutral (matches delay-prefix
+             * seed zeros). All peers synthesize the same bytes locally. */
+            memset(&resolved[slot], 0, sizeof(resolved[slot]));
+            resolved[slot].tick = sim_tick;
+            resolved[slot].valid = 1;
+        }
         else
         {
             RNetInputSample remote;
@@ -2183,12 +2233,19 @@ int rnet_session_peer_disconnected(const RNetSession *s, rnet_u64 timeout_ms)
     if (s->last_peer_rx_ms == 0)
     {
         /* No peer traffic yet — only after we expected packets (linking/running).
-         * Generous window so slow HELLO exchange isn't a false disconnect. */
+         * Rematch session_reboot is often >15s on the slower peer; the old
+         * timeout_ms*10 (~15s at 1500) false-disconnected the fast peer and
+         * BYE'd both back to lobby. Keep a long link budget; callers that
+         * pass timeout_ms==0 skip this path entirely (BYE-only). */
+        rnet_u64 link_budget_ms;
         if (s->phase != RNET_PHASE_RUNNING && s->phase != RNET_PHASE_LINKING)
         {
             return 0;
         }
-        if (s->session_start_ms != 0 && (now - s->session_start_ms) > (timeout_ms * 10u))
+        link_budget_ms = timeout_ms * 60u;
+        if (link_budget_ms < 90000u)
+            link_budget_ms = 90000u;
+        if (s->session_start_ms != 0 && (now - s->session_start_ms) > link_budget_ms)
         {
             return 1;
         }
@@ -2196,6 +2253,15 @@ int rnet_session_peer_disconnected(const RNetSession *s, rnet_u64 timeout_ms)
     }
     last = s->last_peer_rx_ms;
     return (now > last && (now - last) >= timeout_ms) ? 1 : 0;
+}
+
+void rnet_session_touch_peer_liveness(RNetSession *s)
+{
+    if (s == NULL || s->peer_gone)
+    {
+        return;
+    }
+    s->last_peer_rx_ms = session_now(s);
 }
 
 void rnet_session_push_signal(RNetSession *s, const RNetSignal *msg)
@@ -2329,6 +2395,8 @@ void rnet_session_get_stats(const RNetSession *s, RNetSessionStats *out)
     for (slot = 0; slot < s->cfg.slot_count; ++slot) {
         rnet_u32 tip;
         if (slot == s->cfg.local_slot)
+            continue;
+        if (!rnet_config_slot_occupied(&s->cfg, slot))
             continue;
         tip = rnet_ring_highest_valid(&s->remote_rings[slot]);
         if (!have_remote || tip > highest_remote)
@@ -2821,6 +2889,20 @@ int rnet_session_peek_remote_input(const RNetSession *s, int slot, rnet_u32 wire
     if (s == NULL || slot == (int)s->cfg.local_slot)
     {
         return 0;
+    }
+    if (slot < 0 || slot >= (int)s->cfg.slot_count)
+    {
+        return 0;
+    }
+    if (!rnet_config_slot_occupied(&s->cfg, (rnet_u8)slot))
+    {
+        if (out)
+        {
+            memset(out, 0, sizeof(*out));
+            out->tick = wire_tick;
+            out->valid = 1;
+        }
+        return 1;
     }
     return rnet_session_peek_input(s, slot, wire_tick, out);
 }
