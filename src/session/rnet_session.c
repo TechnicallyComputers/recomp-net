@@ -139,6 +139,13 @@ struct RNetSession
     rnet_u64 ice_completed_ms;
     /* Peer RB_FRAME_COMMIT queue (host drains via take_*). */
 #define RNET_RB_FC_QUEUE 64
+    /* PSX-Link group scoping: when >= 0, rollback EPISODE/STATE packets
+     * (SYNC, BASELINE, POST, STATE_*) are accepted only from this slot —
+     * episode coordination is per-console-group in link sessions. FRAME_COMMIT
+     * is NOT filtered (all seats emit the same machine-level pair fold), and
+     * input-plane packets (INPUT, INPUT_CONFIRM, SEAL_ROWS, RESOLVED) are
+     * session-wide. -1 = accept all (default). */
+    int rb_peer_slot;
     rnet_u32 rb_fc_tick[RNET_RB_FC_QUEUE];
     rnet_u32 rb_fc_hash[RNET_RB_FC_QUEUE];
     int rb_fc_q_head; /* next write */
@@ -532,18 +539,38 @@ static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
         }
         break;
     case RNET_PKT_STATE_BEGIN:
+        if (s->rb_peer_slot >= 0 && (int)pkt->local_slot != s->rb_peer_slot)
+        {
+            break;
+        }
         state_on_begin(s, pkt);
         break;
     case RNET_PKT_STATE_CHUNK:
+        if (s->rb_peer_slot >= 0 && (int)pkt->local_slot != s->rb_peer_slot)
+        {
+            break;
+        }
         state_on_chunk(s, pkt);
         break;
     case RNET_PKT_STATE_ACK:
+        if (s->rb_peer_slot >= 0 && (int)pkt->local_slot != s->rb_peer_slot)
+        {
+            break;
+        }
         state_on_ack(s, pkt);
         break;
     case RNET_PKT_STATE_PROBE:
+        if (s->rb_peer_slot >= 0 && (int)pkt->local_slot != s->rb_peer_slot)
+        {
+            break;
+        }
         state_on_probe(s, pkt);
         break;
     case RNET_PKT_STATE_PROBE_REPLY:
+        if (s->rb_peer_slot >= 0 && (int)pkt->local_slot != s->rb_peer_slot)
+        {
+            break;
+        }
         state_on_probe_reply(s, pkt);
         break;
     case RNET_PKT_SIO_MULTI_XFER:
@@ -575,6 +602,8 @@ static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
         }
         break;
     case RNET_PKT_RB_FRAME_COMMIT:
+        /* Not rb_peer_slot-filtered: PSX-Link seats all emit the same
+         * machine-level pair fold, so every peer's commit is comparable. */
         if (pkt->local_slot != s->cfg.local_slot)
         {
             if (s->rb_fc_q_count < RNET_RB_FC_QUEUE)
@@ -597,6 +626,10 @@ static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
         }
         break;
     case RNET_PKT_RB_SYNC:
+        if (s->rb_peer_slot >= 0 && (int)pkt->local_slot != s->rb_peer_slot)
+        {
+            break;
+        }
         if (pkt->local_slot != s->cfg.local_slot &&
             s->rb_sync_count < RNET_RB_CTRL_QUEUE)
         {
@@ -635,6 +668,10 @@ static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
         }
         break;
     case RNET_PKT_RB_BASELINE:
+        if (s->rb_peer_slot >= 0 && (int)pkt->local_slot != s->rb_peer_slot)
+        {
+            break;
+        }
         if (pkt->local_slot != s->cfg.local_slot &&
             s->rb_base_count < RNET_RB_CTRL_QUEUE)
         {
@@ -649,6 +686,10 @@ static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
         }
         break;
     case RNET_PKT_RB_POST:
+        if (s->rb_peer_slot >= 0 && (int)pkt->local_slot != s->rb_peer_slot)
+        {
+            break;
+        }
         if (pkt->local_slot != s->cfg.local_slot &&
             s->rb_post_count < RNET_RB_CTRL_QUEUE)
         {
@@ -1619,6 +1660,7 @@ RNetSession *rnet_session_create(const RNetConfig *cfg, const RNetHostVTable *ho
     s->delay = cfg->input_delay;
     s->phase = RNET_PHASE_IDLE;
     s->is_sim_authority = (cfg->local_slot == 0) ? 1 : 0;
+    s->rb_peer_slot = -1;
     s->session_start_ms = rnet_os_monotonic_ms();
     s->last_peer_rx_ms = 0;
     s->peer_gone = 0;
@@ -2769,6 +2811,15 @@ int rnet_session_send_rb_frame_commit(RNetSession *s, rnet_u32 through_tick,
     }
     send_raw(s, buf, n);
     return 0;
+}
+
+void rnet_session_set_rb_peer_slot(RNetSession *s, int slot)
+{
+    if (s == NULL)
+    {
+        return;
+    }
+    s->rb_peer_slot = slot;
 }
 
 int rnet_session_take_rb_frame_commit(RNetSession *s, rnet_u32 *through_tick,

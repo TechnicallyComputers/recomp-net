@@ -222,6 +222,9 @@ void rnet_session_set_input_send_suppress(RNetSession *s, int suppress);
 int rnet_session_send_rb_frame_commit(RNetSession *s, rnet_u32 through_tick,
                                       rnet_u32 state_hash);
 /* 1 if a peer FRAME_COMMIT is pending; copies and clears it. */
+/* PSX-Link group scoping: accept rollback episode/state packets only from
+ * `slot` (-1 = all, default). Input-plane packets are never filtered. */
+void rnet_session_set_rb_peer_slot(RNetSession *s, int slot);
 int rnet_session_take_rb_frame_commit(RNetSession *s, rnet_u32 *through_tick,
                                       rnet_u32 *state_hash);
 
