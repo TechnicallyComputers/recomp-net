@@ -291,6 +291,13 @@ void rnet_session_clear_remote_inputs(RNetSession *s);
 #define RNET_RB_SYNC_OP_BEGIN 1u
 #define RNET_RB_SYNC_OP_ABORT 2u
 #define RNET_RB_SYNC_OP_COMMIT 3u
+/* Peer identity, sent once at session start. mismatch_tick carries a build
+ * fingerprint and load_tick a content/mod fingerprint; both are opaque to this
+ * library and compared only for equality. Purely diagnostic: it explains WHY
+ * two peers disagree, while the state digests remain what detects THAT they
+ * do. Additive on purpose -- a peer that predates it ignores an unknown op,
+ * and a host that never sends one simply gets no explanation. */
+#define RNET_RB_SYNC_OP_IDENT 4u
 
 /* RB_SYNC flags (BEGIN): initiator-authoritative episode attributes the
  * follower must adopt verbatim so both peers run the same episode shape. */
