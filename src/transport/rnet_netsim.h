@@ -35,6 +35,15 @@
  *   RNET_SIM_SEED         xorshift seed, so a jittered run repeats. Default
  *                         fixed, NOT time-derived: a nondeterministic test
  *                         instrument cannot be used to confirm a fix.
+ *   RNET_SIM_LOSS_PCT     percentage of arriving datagrams to drop, 0-90.
+ *                         Latency and jitter delay and reorder; only loss
+ *                         reaches the paths that must survive a message never
+ *                         arriving at all -- a seal row that is never sent
+ *                         back, a POST that never lands. Independent of
+ *                         latency, so loss can be tested on a fast link.
+ *                         Drops are counted and reported with the banner, so a
+ *                         run's actual loss is in the log rather than assumed
+ *                         from the setting.
  *
  * SAFETY
  *

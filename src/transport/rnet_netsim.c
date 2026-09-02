@@ -28,10 +28,12 @@ struct RNetNetSim
     NetSimEntry slot[RNET_NETSIM_SLOTS];
     rnet_u32 latency_ms;
     rnet_u32 jitter_ms;
+    rnet_u32 loss_pct;
     rnet_u32 rng;
     rnet_u64 next_banner_ms;
     rnet_u64 held_total;
     rnet_u64 overflow_total;
+    rnet_u64 dropped_total;
     rnet_u32 live;
     rnet_u32 live_peak;
 };
@@ -68,10 +70,12 @@ static void netsim_banner(RNetNetSim *sim, rnet_u64 now)
 {
     fprintf(stderr,
             "rnet: *** LINK SIMULATOR ENGAGED *** +%ums recv delay, +/-%ums "
-            "jitter (this side only; peer adds its own). held=%llu "
-            "overflow=%llu queue=%u/%u\n",
+            "jitter, %u%% loss (this side only; peer adds its own). "
+            "held=%llu dropped=%llu overflow=%llu queue=%u/%u\n",
             (unsigned)sim->latency_ms, (unsigned)sim->jitter_ms,
+            (unsigned)sim->loss_pct,
             (unsigned long long)sim->held_total,
+            (unsigned long long)sim->dropped_total,
             (unsigned long long)sim->overflow_total,
             (unsigned)sim->live_peak, (unsigned)RNET_NETSIM_SLOTS);
     fflush(stderr);
@@ -82,11 +86,23 @@ RNetNetSim *rnet_netsim_create(void)
 {
     RNetNetSim *sim;
     rnet_u32 latency = env_u32("RNET_SIM_LATENCY_MS", 0u);
+    rnet_u32 loss = env_u32("RNET_SIM_LOSS_PCT", 0u);
     rnet_u32 jitter;
 
-    if (latency == 0u)
+    /* Loss is independent of latency: dropping on a fast link is a legitimate
+     * and quite different test, so either knob alone engages the simulator. */
+    if ((latency == 0u) && (loss == 0u))
     {
         return NULL;
+    }
+    if (loss > 90u)
+    {
+        fprintf(stderr,
+                "rnet: RNET_SIM_LOSS_PCT=%u clamped to 90 — above that the "
+                "handshakes never complete and the run measures nothing\n",
+                (unsigned)loss);
+        fflush(stderr);
+        loss = 90u;
     }
     if (latency > RNET_NETSIM_MAX_MS)
     {
@@ -119,6 +135,7 @@ RNetNetSim *rnet_netsim_create(void)
     }
     sim->latency_ms = latency;
     sim->jitter_ms = jitter;
+    sim->loss_pct = loss;
     sim->rng = env_u32("RNET_SIM_SEED", 0x5eed1234u);
     if (sim->rng == 0u)
     {
@@ -135,9 +152,10 @@ void rnet_netsim_destroy(RNetNetSim *sim)
         return;
     }
     fprintf(stderr,
-            "rnet: link simulator released — held=%llu overflow=%llu "
-            "peak queue=%u\n",
+            "rnet: link simulator released — held=%llu dropped=%llu "
+            "overflow=%llu peak queue=%u\n",
             (unsigned long long)sim->held_total,
+            (unsigned long long)sim->dropped_total,
             (unsigned long long)sim->overflow_total,
             (unsigned)sim->live_peak);
     fflush(stderr);
@@ -153,6 +171,17 @@ int rnet_netsim_hold(RNetNetSim *sim, const rnet_u8 *buf, size_t len,
     if ((sim == NULL) || (buf == NULL) || (len == 0u) || (len > RNET_MAX_PACKET))
     {
         return 0;
+    }
+    if (sim->loss_pct > 0u)
+    {
+        /* Drawn from the same seeded stream as the jitter, so a seeded run
+         * drops the same datagrams every time. A loss test that cannot be
+         * repeated cannot confirm a fix. */
+        if ((netsim_rand(sim) % 100u) < sim->loss_pct)
+        {
+            sim->dropped_total++;
+            return 1; /* taken and discarded: the caller must not deliver it */
+        }
     }
     for (i = 0u; i < RNET_NETSIM_SLOTS; ++i)
     {
