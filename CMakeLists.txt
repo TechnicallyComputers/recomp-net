@@ -31,6 +31,7 @@ set(RNET_CORE_SOURCES
   src/lobby/rnet_rtt_probe.c
   src/lobby/rnet_ice_rtt.c
   src/lobby/rnet_ice_xfer.c
+  src/transport/rnet_netsim.c
   src/transport/rnet_transport.c
   src/session/rnet_session.c
   src/ice/rnet_ice_state.c

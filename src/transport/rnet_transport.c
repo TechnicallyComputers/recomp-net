@@ -38,6 +38,9 @@ void rnet_transport_shutdown(RNetTransport *t)
     t->hub_mode = 0;
     memset(t->hub_slot_known, 0, sizeof(t->hub_slot_known));
     memset(t->hub_slot_addr, 0, sizeof(t->hub_slot_addr));
+    rnet_netsim_destroy(t->netsim);
+    t->netsim = NULL;
+    t->netsim_probed = 0;
 }
 
 static int sockaddr_equal(const struct sockaddr_in *a, const struct sockaddr_in *b)
@@ -255,16 +258,22 @@ int rnet_transport_send(RNetTransport *t, const rnet_u8 *buf, size_t len)
     return -1;
 }
 
-int rnet_transport_recv(RNetTransport *t, rnet_u8 *buf, size_t cap)
+/* One datagram straight off the wire. `out_src` is the sender when the mode
+ * has one; `out_have_src` says whether it was filled (ICE has no sockaddr).
+ *
+ * Peer LEARNING deliberately does not happen here. Filtering does — a
+ * datagram from a stranger is discarded on arrival, as before — but recording
+ * the pending peer belongs to the datagram the session actually decodes, and
+ * under the link simulator those are different datagrams. Leaving it here
+ * would have let a packet still sitting in the hold queue name the peer. */
+static int transport_recv_raw(RNetTransport *t, rnet_u8 *buf, size_t cap,
+                              struct sockaddr_in *out_src, int *out_have_src)
 {
     int would_block = 0;
     int n;
     struct sockaddr_in src;
 
-    if ((t == NULL) || (buf == NULL) || (cap == 0))
-    {
-        return -1;
-    }
+    *out_have_src = 0;
     if (t->mode == RNET_TRANSPORT_LAN_UDP)
     {
         if (!rnet_os_socket_valid(t->sock))
@@ -281,15 +290,14 @@ int rnet_transport_recv(RNetTransport *t, rnet_u8 *buf, size_t cap)
             if (t->hub_mode)
             {
                 hub_learn_and_forward(t, buf, n, &src);
+                *out_src = src;
+                *out_have_src = 1;
                 return n;
             }
             if (!t->peer_known || sockaddr_equal(&src, &t->peer))
             {
-                if (t->accept_first_peer && !t->peer_known)
-                {
-                    t->pending_peer = src;
-                    t->pending_peer_known = 1;
-                }
+                *out_src = src;
+                *out_have_src = 1;
                 return n;
             }
         }
@@ -308,6 +316,97 @@ int rnet_transport_recv(RNetTransport *t, rnet_u8 *buf, size_t cap)
         return (int)out_len;
     }
     return 0;
+}
+
+static void transport_note_peer(RNetTransport *t, const struct sockaddr_in *src,
+                                int have_src)
+{
+    if (!have_src || t->hub_mode)
+    {
+        return;
+    }
+    if (t->accept_first_peer && !t->peer_known)
+    {
+        t->pending_peer = *src;
+        t->pending_peer_known = 1;
+    }
+}
+
+int rnet_transport_recv(RNetTransport *t, rnet_u8 *buf, size_t cap)
+{
+    struct sockaddr_in src;
+    int have_src = 0;
+    int n;
+
+    if ((t == NULL) || (buf == NULL) || (cap == 0))
+    {
+        return -1;
+    }
+    if (!t->netsim_probed)
+    {
+        t->netsim = rnet_netsim_create();
+        t->netsim_probed = 1;
+    }
+    if (t->netsim == NULL)
+    {
+        n = transport_recv_raw(t, buf, cap, &src, &have_src);
+        if (n > 0)
+        {
+            transport_note_peer(t, &src, have_src);
+        }
+        return n;
+    }
+
+    rnet_netsim_heartbeat(t->netsim);
+    /* Drain the socket completely into the hold queue BEFORE delivering
+     * anything. The caller stops its drain loop on the first 0, so a datagram
+     * that is not due yet must never be what stands between the loop and one
+     * that jitter made due earlier. */
+    for (;;)
+    {
+        rnet_u8 tmp[RNET_MAX_PACKET];
+        struct sockaddr_in tsrc;
+        int thave = 0;
+        int m = transport_recv_raw(t, tmp, sizeof(tmp), &tsrc, &thave);
+        if (m <= 0)
+        {
+            /* A hard error is still a hard error, but only once the queue has
+             * drained — otherwise a socket teardown would discard datagrams
+             * that were already accepted. */
+            if (m < 0)
+            {
+                n = rnet_netsim_due(t->netsim, buf, cap, &src);
+                if (n > 0)
+                {
+                    transport_note_peer(t, &src, 1);
+                    return n;
+                }
+                return -1;
+            }
+            break;
+        }
+        if (!rnet_netsim_hold(t->netsim, tmp, (size_t)m,
+                              thave ? &tsrc : NULL))
+        {
+            /* Queue full (already announced). Delivering it undelayed beats
+             * dropping it: the run's timings are compromised either way, and
+             * silent loss would be read as a netcode defect. */
+            if ((size_t)m <= cap)
+            {
+                memcpy(buf, tmp, (size_t)m);
+                transport_note_peer(t, &tsrc, thave);
+                return m;
+            }
+            break;
+        }
+    }
+
+    n = rnet_netsim_due(t->netsim, buf, cap, &src);
+    if (n > 0)
+    {
+        transport_note_peer(t, &src, 1);
+    }
+    return n;
 }
 
 void rnet_transport_accept_pending_peer(RNetTransport *t)

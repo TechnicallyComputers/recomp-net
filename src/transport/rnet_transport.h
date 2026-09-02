@@ -5,6 +5,7 @@
 #include "recomp_net/transport.h"
 #include "recomp_net/types.h"
 #include "platform/rnet_platform.h"
+#include "rnet_netsim.h"
 
 #include <stddef.h>
 
@@ -31,6 +32,11 @@ struct RNetTransport
     int (*ice_send)(void *ice_ctx, const rnet_u8 *buf, size_t len);
     int (*ice_recv)(void *ice_ctx, rnet_u8 *buf, size_t cap, size_t *out_len);
     void *ice_ctx;
+    /* Test-only link simulator; NULL unless RNET_SIM_LATENCY_MS is set.
+     * Probed once on first receive rather than at init, because init runs
+     * before the process has finished reading its own configuration. */
+    RNetNetSim *netsim;
+    int netsim_probed;
 };
 
 void rnet_transport_init(RNetTransport *t);
