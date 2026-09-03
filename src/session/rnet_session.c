@@ -179,6 +179,12 @@ struct RNetSession
     } rb_post_q[RNET_RB_CTRL_QUEUE];
     int rb_post_head, rb_post_tail, rb_post_count;
 
+    /* Mod-set handshake. Latest-only by design: see the header. */
+    char modset_text[RNET_MODSET_TEXT_MAX];
+    rnet_u8 modset_pending;
+    char modset_ack_reason[RNET_MODSET_REASON_MAX];
+    rnet_u8 modset_ack_status;
+    rnet_u8 modset_ack_pending;
     rnet_u32 rb_resolved_q[RNET_RB_CTRL_QUEUE];
     int rb_resolved_head, rb_resolved_tail, rb_resolved_count;
 
@@ -700,6 +706,24 @@ static void handle_decoded(RNetSession *s, const RNetDecodedPacket *pkt)
             s->rb_post_q[s->rb_post_head].match = pkt->rb_match;
             s->rb_post_head = (s->rb_post_head + 1) % RNET_RB_CTRL_QUEUE;
             s->rb_post_count++;
+        }
+        break;
+    case RNET_PKT_MODSET:
+        if (pkt->local_slot != s->cfg.local_slot)
+        {
+            memcpy(s->modset_text, pkt->modset_text, sizeof(s->modset_text));
+            s->modset_text[sizeof(s->modset_text) - 1] = '\0';
+            s->modset_pending = 1u;
+        }
+        break;
+    case RNET_PKT_MODSET_ACK:
+        if (pkt->local_slot != s->cfg.local_slot)
+        {
+            memcpy(s->modset_ack_reason, pkt->modset_reason,
+                   sizeof(s->modset_ack_reason));
+            s->modset_ack_reason[sizeof(s->modset_ack_reason) - 1] = '\0';
+            s->modset_ack_status = pkt->modset_status;
+            s->modset_ack_pending = 1u;
         }
         break;
     case RNET_PKT_RB_RESOLVED:
@@ -3206,6 +3230,86 @@ int rnet_session_poll_sio_multi_xfer(RNetSession *s, rnet_u8 *unit_id, rnet_u32 
         *confirm_pad = s->sio_xfer_q[s->sio_xfer_tail].confirm_pad;
     s->sio_xfer_tail = (s->sio_xfer_tail + 1) % RNET_SIO_XFER_QUEUE;
     s->sio_xfer_count--;
+    return 1;
+}
+
+int rnet_session_send_modset(RNetSession *s, const char *text)
+{
+    rnet_u8 buf[RNET_MAX_PACKET];
+    int n;
+    if ((s == NULL) || (text == NULL) || (s->phase != RNET_PHASE_RUNNING))
+    {
+        return -1;
+    }
+    n = rnet_proto_encode_modset(buf, sizeof(buf), s->cfg.protocol_magic,
+                                 s->cfg.session_id, (rnet_u8)s->cfg.local_slot,
+                                 text);
+    if (n <= 0)
+    {
+        return -1;
+    }
+    rnet_transport_send(&s->transport, buf, (size_t)n);
+    return 0;
+}
+
+int rnet_session_take_modset(RNetSession *s, char *out, rnet_u32 cap)
+{
+    if ((s == NULL) || (out == NULL) || (cap == 0u) || (s->modset_pending == 0u))
+    {
+        return 0;
+    }
+    s->modset_pending = 0u;
+    if ((rnet_u32)strlen(s->modset_text) >= cap)
+    {
+        return 0; /* caller's buffer cannot hold it; never hand back a prefix */
+    }
+    memcpy(out, s->modset_text, strlen(s->modset_text) + 1u);
+    return 1;
+}
+
+int rnet_session_send_modset_ack(RNetSession *s, rnet_u8 status,
+                                 const char *reason)
+{
+    rnet_u8 buf[RNET_MAX_PACKET];
+    int n;
+    if ((s == NULL) || (s->phase != RNET_PHASE_RUNNING))
+    {
+        return -1;
+    }
+    n = rnet_proto_encode_modset_ack(buf, sizeof(buf), s->cfg.protocol_magic,
+                                     s->cfg.session_id,
+                                     (rnet_u8)s->cfg.local_slot, status,
+                                     reason);
+    if (n <= 0)
+    {
+        return -1;
+    }
+    rnet_transport_send(&s->transport, buf, (size_t)n);
+    return 0;
+}
+
+int rnet_session_take_modset_ack(RNetSession *s, rnet_u8 *status, char *reason,
+                                 rnet_u32 cap)
+{
+    if ((s == NULL) || (s->modset_ack_pending == 0u))
+    {
+        return 0;
+    }
+    s->modset_ack_pending = 0u;
+    if (status != NULL)
+    {
+        *status = s->modset_ack_status;
+    }
+    if ((reason != NULL) && (cap > 0u))
+    {
+        rnet_u32 n = (rnet_u32)strlen(s->modset_ack_reason);
+        if (n >= cap)
+        {
+            n = cap - 1u;
+        }
+        memcpy(reason, s->modset_ack_reason, n);
+        reason[n] = '\0';
+    }
     return 1;
 }
 

@@ -337,6 +337,26 @@ int rnet_session_send_rb_post(RNetSession *s, rnet_u32 epoch_id, rnet_u32 target
 int rnet_session_take_rb_post(RNetSession *s, rnet_u32 *epoch_id, rnet_u32 *target_tick,
                               rnet_u32 *digest_master, rnet_u32 *input_digest, rnet_u8 *match);
 
+/*
+ * Mod-set negotiation. The host publishes the exact set every peer must run
+ * and each peer answers whether it can honour it; the match may not start
+ * until it has. Mods patch guest memory, so a peer that cannot reproduce the
+ * host's set is running a different game -- better refused at the door than
+ * discovered desyncing in the third round.
+ *
+ * Only the most recent of each is kept. These are handshake messages, not a
+ * stream: an older set is never the one to act on, and queueing them would
+ * only let a stale set win a race against the current one.
+ */
+int rnet_session_send_modset(RNetSession *s, const char *text);
+/* 1 and fills `out` when a set has arrived since the last take, else 0. */
+int rnet_session_take_modset(RNetSession *s, char *out, rnet_u32 cap);
+int rnet_session_send_modset_ack(RNetSession *s, rnet_u8 status,
+                                 const char *reason);
+/* 1 and fills status/reason when an ack has arrived since the last take. */
+int rnet_session_take_modset_ack(RNetSession *s, rnet_u8 *status, char *reason,
+                                 rnet_u32 cap);
+
 int rnet_session_send_rb_resolved(RNetSession *s, rnet_u32 resolved_through);
 int rnet_session_take_rb_resolved(RNetSession *s, rnet_u32 *resolved_through);
 

@@ -480,6 +480,68 @@ int rnet_proto_encode_rb_frame_commit(rnet_u8 *out, size_t cap, rnet_u32 magic, 
     return finish_packet(out, c, cap);
 }
 
+static size_t clamped_len(const char *v, size_t cap)
+{
+    size_t n = 0;
+    if (v == NULL)
+    {
+        return 0;
+    }
+    while ((n < cap) && (v[n] != '\0'))
+    {
+        n++;
+    }
+    return n;
+}
+
+int rnet_proto_encode_modset(rnet_u8 *out, size_t cap, rnet_u32 magic,
+                             rnet_u32 session_id, rnet_u8 local_slot,
+                             const char *text)
+{
+    rnet_u8 *c = out;
+    size_t n = clamped_len(text, RNET_MODSET_TEXT_MAX);
+    if (cap < (18 + n))
+    {
+        return -1;
+    }
+    write_u32(&c, magic);
+    write_u16(&c, RNET_PKT_MODSET);
+    write_u32(&c, session_id);
+    *c++ = local_slot;
+    *c++ = 0;
+    write_u16(&c, (rnet_u16)n);
+    if (n > 0u)
+    {
+        memcpy(c, text, n);
+        c += n;
+    }
+    return finish_packet(out, c, cap);
+}
+
+int rnet_proto_encode_modset_ack(rnet_u8 *out, size_t cap, rnet_u32 magic,
+                                 rnet_u32 session_id, rnet_u8 local_slot,
+                                 rnet_u8 status, const char *reason)
+{
+    rnet_u8 *c = out;
+    size_t n = clamped_len(reason, RNET_MODSET_REASON_MAX);
+    if (cap < (18 + n))
+    {
+        return -1;
+    }
+    write_u32(&c, magic);
+    write_u16(&c, RNET_PKT_MODSET_ACK);
+    write_u32(&c, session_id);
+    *c++ = local_slot;
+    *c++ = status;
+    write_u16(&c, (rnet_u16)n);
+    if (n > 0u)
+    {
+        memcpy(c, reason, n);
+        c += n;
+    }
+    return finish_packet(out, c, cap);
+}
+
 int rnet_proto_encode_rb_resolved(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id,
                                   rnet_u8 local_slot, rnet_u32 resolved_through)
 {
@@ -788,6 +850,39 @@ int rnet_proto_decode(const rnet_u8 *data, size_t len, rnet_u32 expect_magic, RN
         out->rb_through_tick = read_u32(&c);
         out->rb_state_hash = read_u32(&c);
         break;
+    case RNET_PKT_MODSET:
+    case RNET_PKT_MODSET_ACK:
+    {
+        rnet_u16 n;
+        char *dst;
+        size_t dst_cap;
+        if ((size_t)(end - c) < 4)
+        {
+            return -1;
+        }
+        out->local_slot = *c++;
+        out->modset_status = *c++;
+        n = read_u16(&c);
+        dst = (out->type == RNET_PKT_MODSET) ? out->modset_text
+                                             : out->modset_reason;
+        dst_cap = (out->type == RNET_PKT_MODSET) ? RNET_MODSET_TEXT_MAX
+                                                 : RNET_MODSET_REASON_MAX;
+        /* A body longer than the field is a malformed or hostile packet, not
+         * something to truncate into: a truncated set compares equal to any
+         * set sharing its prefix. */
+        if (((size_t)n >= dst_cap) || ((size_t)(end - c) < (size_t)n))
+        {
+            return -1;
+        }
+        if (n > 0u)
+        {
+            memcpy(dst, c, (size_t)n);
+            c += n;
+        }
+        dst[n] = '\0';
+        out->modset_len = n;
+        break;
+    }
     case RNET_PKT_RB_RESOLVED:
         if ((size_t)(end - c) < 6)
         {

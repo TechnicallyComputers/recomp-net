@@ -37,6 +37,29 @@ extern "C" {
 #define RNET_PKT_RB_FRAME_COMMIT 24 /* state/master-hash watermark agreement token */
 #define RNET_PKT_RB_RESOLVED 25    /* resolved-through / shared frontier advertise */
 
+/* Mod-set negotiation, run once before the match may start.
+ *
+ * The host is authoritative: it publishes the exact set every peer must run,
+ * and a peer answers whether it can. Mods patch guest memory, so a peer that
+ * cannot reproduce the host's set is running a different game and must not be
+ * allowed to start rather than be discovered desyncing later.
+ *
+ * One packet, not a chunked transfer: a realistic set is a few hundred bytes
+ * against a 1200-byte MTU, and a set too large to fit is refused loudly rather
+ * than silently truncated -- two different sets can share a prefix. */
+#define RNET_PKT_MODSET 26      /* host->peer: canonical effective mod set */
+#define RNET_PKT_MODSET_ACK 27  /* peer->host: can/cannot honour it, and why */
+
+#define RNET_MODSET_TEXT_MAX 1024u
+#define RNET_MODSET_REASON_MAX 96u
+
+/* MODSET_ACK status */
+#define RNET_MODSET_OK 0u
+#define RNET_MODSET_MISSING 1u   /* package absent entirely */
+#define RNET_MODSET_VERSION 2u   /* present at a different version */
+#define RNET_MODSET_OPTION 3u    /* option or value this build cannot honour */
+#define RNET_MODSET_TOO_BIG 4u   /* set did not fit the packet */
+
 #define RNET_MAX_PACKET 1200
 /* Must be >= max input_delay (20) + 1 so the neutral delay prefix can fit in
  * one INPUT bundle. send_input_bundle also multi-packets if the window is
@@ -137,6 +160,12 @@ int rnet_proto_encode_rb_post(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32
                               rnet_u32 input_digest, rnet_u8 match);
 int rnet_proto_encode_rb_frame_commit(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id,
                                       rnet_u8 local_slot, rnet_u32 through_tick, rnet_u32 state_hash);
+int rnet_proto_encode_modset(rnet_u8 *out, size_t cap, rnet_u32 magic,
+                             rnet_u32 session_id, rnet_u8 local_slot,
+                             const char *text);
+int rnet_proto_encode_modset_ack(rnet_u8 *out, size_t cap, rnet_u32 magic,
+                                 rnet_u32 session_id, rnet_u8 local_slot,
+                                 rnet_u8 status, const char *reason);
 int rnet_proto_encode_rb_resolved(rnet_u8 *out, size_t cap, rnet_u32 magic, rnet_u32 session_id,
                                   rnet_u8 local_slot, rnet_u32 resolved_through);
 
@@ -189,6 +218,11 @@ typedef struct RNetDecodedPacket
     rnet_u32 rb_through_tick;
     rnet_u32 rb_state_hash;
     rnet_u32 rb_resolved_through;
+    /* MODSET / MODSET_ACK */
+    char modset_text[RNET_MODSET_TEXT_MAX];
+    rnet_u16 modset_len;
+    rnet_u8 modset_status;
+    char modset_reason[RNET_MODSET_REASON_MAX];
     /* SIO_MULTI_XFER */
     rnet_u8 sio_unit_id;
     rnet_u32 sio_xfer_seq;
