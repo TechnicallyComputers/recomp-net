@@ -378,6 +378,20 @@ void rnet_ice_xfer_pump(RNetIceXfer *xfer)
     }
 }
 
+void rnet_ice_xfer_path(const RNetIceXfer *xfer, char *out, size_t cap)
+{
+    if (!out || cap == 0)
+        return;
+    out[0] = '\0';
+    if (!xfer || !xfer->agent) {
+        snprintf(out, cap, "unknown");
+        return;
+    }
+    rnet_ice_agent_selected_info(xfer->agent, out, cap, NULL, 0, NULL, 0);
+    if (out[0] == '\0')
+        snprintf(out, cap, "unknown");
+}
+
 RNetIceState rnet_ice_xfer_state(const RNetIceXfer *xfer)
 {
     if (!xfer || !xfer->agent)
@@ -388,8 +402,13 @@ RNetIceState rnet_ice_xfer_state(const RNetIceXfer *xfer)
 int rnet_ice_xfer_queue_blob(RNetIceXfer *xfer, uint8_t *data, size_t len)
 {
     XferBlob *b;
-    if (!xfer || xfer->failed)
+    /* The header promises this takes ownership. It has to do so on EVERY
+     * path, or a caller cannot write a correct failure branch: freeing would
+     * double-free the full-queue case, and not freeing leaks the others. */
+    if (!xfer || xfer->failed) {
+        free(data);
         return -1;
+    }
     if (len > 0 && !data)
         return -1;
     if (xfer->send_n >= XFER_Q) {
@@ -490,6 +509,13 @@ RNetIceState rnet_ice_xfer_state(const RNetIceXfer *xfer)
 {
     (void)xfer;
     return RNET_ICE_STATE_IDLE;
+}
+
+void rnet_ice_xfer_path(const RNetIceXfer *xfer, char *out, size_t cap)
+{
+    (void)xfer;
+    if (out && cap)
+        snprintf(out, cap, "none");
 }
 
 int rnet_ice_xfer_queue_blob(RNetIceXfer *xfer, uint8_t *data, size_t len)
